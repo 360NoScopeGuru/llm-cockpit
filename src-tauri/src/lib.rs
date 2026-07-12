@@ -1,3 +1,4 @@
+mod benchmark;
 mod estimator;
 mod gguf;
 mod llama;
@@ -97,6 +98,23 @@ fn estimate_config(
     Ok(estimator::estimate(&shape, gpu_total, gpu_free, notes))
 }
 
+/// Measured benchmark: launch each config for real and measure tok/s + peak
+/// VRAM. Stops any running model first (to free VRAM) and emits a
+/// `benchmark-progress` event as each config completes.
+#[tauri::command]
+fn benchmark_model(
+    window: tauri::Window,
+    llama: State<'_, LlamaManager>,
+    model_path: String,
+    configs: Vec<benchmark::BenchConfig>,
+) -> Vec<benchmark::BenchResult> {
+    use tauri::Emitter;
+    let _ = llama.stop();
+    benchmark::run_benchmark(&model_path, &configs, |r| {
+        let _ = window.emit("benchmark-progress", r);
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -112,7 +130,8 @@ pub fn run() {
             llama_stop,
             llama_status,
             inference_metrics,
-            estimate_config
+            estimate_config,
+            benchmark_model
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

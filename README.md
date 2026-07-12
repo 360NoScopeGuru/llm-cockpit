@@ -16,8 +16,9 @@ hardware, then runs it under live telemetry.
    add; read GGUF metadata directly (arch, quant, context length) with zero
    re-downloading. *(done: parser + scanner + library view)*
 2. **Hardware-aware auto-config + benchmarking** — estimate then *measure* the
-   Pareto-optimal quant/context/GPU-layer config for your GPU. *(tier 1 done:
-   VRAM-fit estimator; measured benchmark pending)*
+   Pareto-optimal quant/context/GPU-layer config for your GPU. *(done: VRAM-fit
+   estimator + measured benchmark that launches candidate configs and records
+   real tok/s + peak VRAM)*
 3. **Live telemetry cockpit** — VRAM/util/temp/power + tokens/sec, prefill-vs-decode
    split, KV-cache occupancy while generating. *(done: GPU + system telemetry +
    inference-side metrics from llama-server)*
@@ -52,6 +53,11 @@ Rust backend (`src-tauri/src/`):
   + the GPU's VRAM, computes the max GPU-offload layers + context that fit
   (weights + KV-cache + overhead vs a headroom budget). Command: `estimate_config`.
   Verified against real models on the RTX 5080.
+- `benchmark.rs` — measured benchmark (the moat). Launches each candidate config
+  for real on a dedicated port, generates a fixed token count (`ignore_eos`), and
+  records real prefill/decode tok/s (token-count / time) + peak VRAM (NVML sampled
+  during the run). Emits per-config progress. Command: `benchmark_model`. Verified
+  on the RTX 5080 (full offload 193 tok/s vs partial 24 tok/s decode — an 8× cliff).
 
 Frontend (`src/`):
 - `Telemetry.tsx` — cockpit panel polling `gpu_telemetry` + `inference_metrics`
@@ -61,8 +67,10 @@ Frontend (`src/`):
   polling `llama_status`.
 - `AutoConfig.tsx` — recommendation panel (full/partial offload, layers, context)
   with a stacked VRAM-breakdown bar and a launch-with-this-config button.
+- `Benchmark.tsx` — measured-benchmark panel with a live-updating results table
+  (load time, prefill/decode tok/s, peak VRAM) that highlights the fastest config.
 - `App.tsx` — model library view (arch, quant, context, size, source) with
-  per-model Auto-config + Launch buttons.
+  per-model Auto-config, Bench, and Launch buttons.
 
 ## Develop
 

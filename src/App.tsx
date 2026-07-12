@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { TelemetryCockpit } from "./Telemetry";
 import { ServerBar, ServerStatus } from "./ServerBar";
 import { AutoConfigPanel, VramEstimate } from "./AutoConfig";
+import { BenchmarkPanel, BenchResult } from "./Benchmark";
 import "./App.css";
 
 // Mirrors the serde output of the Rust `scanner`/`gguf` modules (snake_case).
@@ -72,6 +74,13 @@ function App() {
     { path: string; name: string; data: VramEstimate } | null
   >(null);
   const [estimating, setEstimating] = useState<string | null>(null);
+  const [bench, setBench] = useState<{
+    path: string;
+    name: string;
+    expected: number;
+    results: BenchResult[];
+  } | null>(null);
+  const [benching, setBenching] = useState<string | null>(null);
 
   async function rescan() {
     setScanning(true);
@@ -150,6 +159,48 @@ function App() {
     setServer(await invoke<ServerStatus>("llama_status"));
   }
 
+  async function benchmark(model: ModelEntry) {
+    setBenching(model.path);
+    setError(null);
+    const name = model.metadata?.name ?? model.file_name;
+    try {
+      // Derive a 2-config sweep: the recommended config vs a reduced-offload one
+      // to expose the GPU-offload speed cliff.
+      const est = await invoke<VramEstimate>("estimate_config", {
+        modelPath: model.path,
+      });
+      const rec = est.n_gpu_layers;
+      const reduced = Math.max(1, Math.floor(rec / 3));
+      const configs = [
+        { n_gpu_layers: rec, ctx_size: est.ctx_size },
+        { n_gpu_layers: reduced, ctx_size: est.ctx_size },
+      ];
+      setBench({ path: model.path, name, expected: configs.length, results: [] });
+
+      const unlisten = await listen<BenchResult>("benchmark-progress", (e) => {
+        setBench((prev) =>
+          prev && prev.path === model.path
+            ? { ...prev, results: [...prev.results, e.payload] }
+            : prev
+        );
+      });
+      const final = await invoke<BenchResult[]>("benchmark_model", {
+        modelPath: model.path,
+        configs,
+      });
+      unlisten();
+      setBench((prev) =>
+        prev && prev.path === model.path ? { ...prev, results: final } : prev
+      );
+    } catch (e) {
+      setError(String(e));
+      setBench(null);
+    } finally {
+      setBenching(null);
+      setServer(await invoke<ServerStatus>("llama_status"));
+    }
+  }
+
   useEffect(() => {
     rescan();
   }, []);
@@ -192,6 +243,16 @@ function App() {
             if (model) launch(model, { nGpuLayers: ngl, ctxSize: ctx });
           }}
           onDismiss={() => setEstimate(null)}
+        />
+      )}
+
+      {bench && (
+        <BenchmarkPanel
+          name={bench.name}
+          results={bench.results}
+          running={benching === bench.path}
+          expected={bench.expected}
+          onDismiss={() => setBench(null)}
         />
       )}
 
@@ -278,6 +339,14 @@ function App() {
                           title="Estimate optimal config for your GPU"
                         >
                           {estimating === m.path ? "…" : "⚙ Auto"}
+                        </button>
+                        <button
+                          className="bench-btn"
+                          disabled={benching !== null || !!m.parse_error}
+                          onClick={() => benchmark(m)}
+                          title="Measure real tok/s across configs on your GPU"
+                        >
+                          {benching === m.path ? "Benchmarking…" : "Bench"}
                         </button>
                         <button
                           className="launch-btn"
