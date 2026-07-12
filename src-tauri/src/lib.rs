@@ -9,7 +9,7 @@ use std::path::Path;
 use tauri::State;
 
 use estimator::VramEstimate;
-use llama::{LlamaBinary, LlamaManager, LlamaServerConfig, ServerStatus};
+use llama::{InferenceMetrics, LlamaBinary, LlamaManager, LlamaServerConfig, ServerStatus};
 use scanner::{ModelEntry, ScanRoot};
 use telemetry::{TelemetrySnapshot, TelemetryState};
 
@@ -56,6 +56,12 @@ fn llama_stop(state: State<'_, LlamaManager>) -> Result<(), String> {
 #[tauri::command]
 fn llama_status(state: State<'_, LlamaManager>) -> ServerStatus {
     state.status()
+}
+
+/// Inference-side metrics (tok/s, KV-cache usage) from the running server.
+#[tauri::command]
+fn inference_metrics(state: State<'_, LlamaManager>) -> Option<InferenceMetrics> {
+    state.metrics()
 }
 
 /// Estimate the optimal GPU-offload + context config for a model on this GPU.
@@ -105,6 +111,7 @@ pub fn run() {
             llama_start,
             llama_stop,
             llama_status,
+            inference_metrics,
             estimate_config
         ])
         .run(tauri::generate_context!())

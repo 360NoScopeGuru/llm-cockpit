@@ -19,8 +19,8 @@ hardware, then runs it under live telemetry.
    Pareto-optimal quant/context/GPU-layer config for your GPU. *(tier 1 done:
    VRAM-fit estimator; measured benchmark pending)*
 3. **Live telemetry cockpit** — VRAM/util/temp/power + tokens/sec, prefill-vs-decode
-   split, KV-cache occupancy while generating. *(done: GPU + system telemetry;
-   inference-side metrics pending llama-server integration)*
+   split, KV-cache occupancy while generating. *(done: GPU + system telemetry +
+   inference-side metrics from llama-server)*
 
 ## Stack
 
@@ -44,16 +44,19 @@ Rust backend (`src-tauri/src/`):
   (prefers CUDA; discovers LM Studio's bundled builds and injects their sibling
   `vendor/` DLL dirs into the child PATH), launches a model with configurable
   GPU layers / context, and tracks lifecycle + `/health`. Commands:
-  `llama_binaries`, `llama_start`, `llama_stop`, `llama_status`. Verified by
-  launching a real 4B model on the RTX 5080 (load → healthy → stop).
+  `llama_binaries`, `llama_start`, `llama_stop`, `llama_status`, and
+  `inference_metrics` (scrapes llama-server's Prometheus `/metrics` for decode/
+  prefill tok/s + KV-cache usage). Verified by launching a real 4B model on the
+  RTX 5080 and reading back live tok/s (load → generate → metrics → stop).
 - `estimator.rs` — hardware-aware auto-config (tier 1). From a model's GGUF shape
   + the GPU's VRAM, computes the max GPU-offload layers + context that fit
   (weights + KV-cache + overhead vs a headroom budget). Command: `estimate_config`.
   Verified against real models on the RTX 5080.
 
 Frontend (`src/`):
-- `Telemetry.tsx` — cockpit panel polling `gpu_telemetry` once a second with
-  color-coded meters.
+- `Telemetry.tsx` — cockpit panel polling `gpu_telemetry` + `inference_metrics`
+  once a second: color-coded GPU/system meters plus an Inference tile (decode/
+  prefill tok/s, KV-cache) that appears while a model runs.
 - `ServerBar.tsx` — server status bar (health dot, model, binary, base URL, Stop)
   polling `llama_status`.
 - `AutoConfig.tsx` — recommendation panel (full/partial offload, layers, context)

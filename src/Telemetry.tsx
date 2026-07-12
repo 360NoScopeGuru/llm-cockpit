@@ -28,6 +28,16 @@ interface TelemetrySnapshot {
   timestamp_ms: number;
 }
 
+interface InferenceMetrics {
+  prompt_tokens_total: number;
+  predicted_tokens_total: number;
+  prompt_tokens_per_sec: number;
+  predicted_tokens_per_sec: number;
+  kv_cache_usage_ratio: number;
+  kv_cache_tokens: number;
+  requests_processing: number;
+}
+
 const POLL_MS = 1000;
 
 function gb(bytes: number): number {
@@ -68,13 +78,20 @@ function Meter({
 
 export function TelemetryCockpit() {
   const [snap, setSnap] = useState<TelemetrySnapshot | null>(null);
+  const [metrics, setMetrics] = useState<InferenceMetrics | null>(null);
 
   useEffect(() => {
     let alive = true;
     const poll = async () => {
       try {
-        const s = await invoke<TelemetrySnapshot>("gpu_telemetry");
-        if (alive) setSnap(s);
+        const [s, m] = await Promise.all([
+          invoke<TelemetrySnapshot>("gpu_telemetry"),
+          invoke<InferenceMetrics | null>("inference_metrics"),
+        ]);
+        if (alive) {
+          setSnap(s);
+          setMetrics(m);
+        }
       } catch {
         /* transient; keep last snapshot */
       }
@@ -98,6 +115,36 @@ export function TelemetryCockpit() {
 
   return (
     <div className="cockpit">
+      {metrics && (
+        <div className="tile inference">
+          <div className="tile-title">
+            Inference
+            <span className="tile-stat">
+              {metrics.requests_processing > 0 ? "generating" : "idle"}
+            </span>
+          </div>
+          <div className="infer-rates">
+            <div className="rate-box">
+              <span className="rate">
+                {metrics.predicted_tokens_per_sec.toFixed(1)}
+              </span>
+              <span className="rate-label">decode tok/s</span>
+            </div>
+            <div className="rate-box">
+              <span className="rate">
+                {metrics.prompt_tokens_per_sec.toFixed(0)}
+              </span>
+              <span className="rate-label">prefill tok/s</span>
+            </div>
+          </div>
+          <Meter
+            label="KV cache"
+            pct={metrics.kv_cache_usage_ratio * 100}
+            valueText={`${(metrics.kv_cache_usage_ratio * 100).toFixed(0)}%`}
+          />
+        </div>
+      )}
+
       {snap.gpus.map((g) => {
         const vramPct =
           g.vram_total_bytes > 0

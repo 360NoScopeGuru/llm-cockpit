@@ -76,6 +76,21 @@ impl ServerStatus {
     }
 }
 
+/// Inference-side metrics scraped from llama-server's Prometheus `/metrics`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct InferenceMetrics {
+    pub prompt_tokens_total: f64,
+    pub predicted_tokens_total: f64,
+    /// Current prompt-processing (prefill) speed, tokens/sec.
+    pub prompt_tokens_per_sec: f64,
+    /// Current generation (decode) speed, tokens/sec.
+    pub predicted_tokens_per_sec: f64,
+    /// KV cache fill fraction, 0.0–1.0.
+    pub kv_cache_usage_ratio: f64,
+    pub kv_cache_tokens: f64,
+    pub requests_processing: f64,
+}
+
 struct RunningServer {
     child: Child,
     base_url: String,
@@ -190,6 +205,17 @@ impl LlamaManager {
         Ok(())
     }
 
+    /// Scrape the running server's `/metrics`. Returns None if nothing is
+    /// running. Releases the lock before the HTTP call so status polling on
+    /// another thread isn't blocked.
+    pub fn metrics(&self) -> Option<InferenceMetrics> {
+        let base = {
+            let guard = self.inner.lock().unwrap();
+            guard.as_ref().map(|s| s.base_url.clone())
+        }?;
+        fetch_metrics(&base)
+    }
+
     pub fn status(&self) -> ServerStatus {
         let mut guard = self.inner.lock().unwrap();
         let Some(server) = guard.as_mut() else {
@@ -240,6 +266,8 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
         "127.0.0.1".into(),
         "--port".into(),
         cfg.port.to_string(),
+        // Expose the Prometheus /metrics endpoint for the inference cockpit.
+        "--metrics".into(),
     ];
     if let Some(ngl) = cfg.n_gpu_layers {
         args.push("-ngl".into());
@@ -254,6 +282,48 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
     }
     args.extend(cfg.extra_args.iter().cloned());
     args
+}
+
+/// Fetch + parse the server's Prometheus `/metrics`.
+fn fetch_metrics(base_url: &str) -> Option<InferenceMetrics> {
+    let url = format!("{base_url}/metrics");
+    let body = ureq::get(&url)
+        .timeout(Duration::from_millis(800))
+        .call()
+        .ok()?
+        .into_string()
+        .ok()?;
+    Some(parse_metrics(&body))
+}
+
+/// Parse the subset of llama-server Prometheus metrics we display. Lines are
+/// `name value` (or `name{labels} value`); comments start with `#`.
+fn parse_metrics(body: &str) -> InferenceMetrics {
+    let mut m = InferenceMetrics::default();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let (Some(key), Some(val)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        // Strip any `{label="…"}` suffix.
+        let key = key.split('{').next().unwrap_or(key);
+        let v: f64 = val.parse().unwrap_or(0.0);
+        match key {
+            "llamacpp:prompt_tokens_total" => m.prompt_tokens_total = v,
+            "llamacpp:tokens_predicted_total" => m.predicted_tokens_total = v,
+            "llamacpp:prompt_tokens_seconds" => m.prompt_tokens_per_sec = v,
+            "llamacpp:predicted_tokens_seconds" => m.predicted_tokens_per_sec = v,
+            "llamacpp:kv_cache_usage_ratio" => m.kv_cache_usage_ratio = v,
+            "llamacpp:kv_cache_tokens" => m.kv_cache_tokens = v,
+            "llamacpp:requests_processing" => m.requests_processing = v,
+            _ => {}
+        }
+    }
+    m
 }
 
 /// Probe `GET /health`. 200 => ok, 503 => still loading the model.
@@ -439,6 +509,33 @@ mod tests {
     }
 
     #[test]
+    fn parses_prometheus_metrics() {
+        let body = "\
+# HELP llamacpp:prompt_tokens_total Number of prompt tokens processed.
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 42
+llamacpp:tokens_predicted_total 128
+llamacpp:prompt_tokens_seconds 512.5
+llamacpp:predicted_tokens_seconds 87.3
+llamacpp:kv_cache_usage_ratio 0.25
+llamacpp:kv_cache_tokens 1024
+llamacpp:requests_processing 1
+";
+        let m = parse_metrics(body);
+        assert_eq!(m.prompt_tokens_total, 42.0);
+        assert_eq!(m.predicted_tokens_total, 128.0);
+        assert_eq!(m.predicted_tokens_per_sec, 87.3);
+        assert_eq!(m.kv_cache_usage_ratio, 0.25);
+        assert_eq!(m.requests_processing, 1.0);
+    }
+
+    #[test]
+    fn parses_metrics_with_labels() {
+        let m = parse_metrics("llamacpp:predicted_tokens_seconds{model=\"x\"} 12.5\n");
+        assert_eq!(m.predicted_tokens_per_sec, 12.5);
+    }
+
+    #[test]
     fn ranks_cuda_over_vulkan_over_cpu() {
         let cuda = classify_backend("llama.cpp-win-x86_64-nvidia-cuda12-avx2-2.24.0").0;
         let vulkan = classify_backend("llama.cpp-win-x86_64-vulkan-avx2-2.23.1").0;
@@ -502,6 +599,27 @@ mod tests {
             .is_ok();
         println!("/props reachable: {props_ok}");
         assert!(props_ok, "/props should be reachable when healthy");
+
+        // Generate a few tokens so the metrics endpoint has real data.
+        let _ = ureq::post("http://127.0.0.1:8137/completion")
+            .timeout(Duration::from_secs(30))
+            .set("Content-Type", "application/json")
+            .send_string(
+                r#"{"prompt":"Count from one to five:","n_predict":24,"stream":false}"#,
+            );
+
+        let metrics = fetch_metrics("http://127.0.0.1:8137").expect("metrics");
+        println!(
+            "metrics: predicted_total={} decode={:.1} tok/s, prefill={:.1} tok/s, kv={:.1}%",
+            metrics.predicted_tokens_total,
+            metrics.predicted_tokens_per_sec,
+            metrics.prompt_tokens_per_sec,
+            metrics.kv_cache_usage_ratio * 100.0,
+        );
+        assert!(
+            metrics.predicted_tokens_total > 0.0,
+            "should have generated tokens"
+        );
 
         mgr.stop().expect("stop should succeed");
         println!("stopped");
