@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TelemetryCockpit } from "./Telemetry";
 import { ServerBar, ServerStatus } from "./ServerBar";
+import { AutoConfigPanel, VramEstimate } from "./AutoConfig";
 import "./App.css";
 
 // Mirrors the serde output of the Rust `scanner`/`gguf` modules (snake_case).
@@ -67,6 +68,10 @@ function App() {
   const [error, setError] = useState<string | null>(null);
   const [server, setServer] = useState<ServerStatus | null>(null);
   const [launching, setLaunching] = useState<string | null>(null);
+  const [estimate, setEstimate] = useState<
+    { path: string; name: string; data: VramEstimate } | null
+  >(null);
+  const [estimating, setEstimating] = useState<string | null>(null);
 
   async function rescan() {
     setScanning(true);
@@ -85,18 +90,22 @@ function App() {
     }
   }
 
-  async function launch(model: ModelEntry) {
+  async function launch(
+    model: ModelEntry,
+    opts?: { nGpuLayers?: number; ctxSize?: number }
+  ) {
     setLaunching(model.path);
     try {
       const status = await invoke<ServerStatus>("llama_start", {
         config: {
           model_path: model.path,
-          n_gpu_layers: 999,
-          ctx_size: 4096,
+          n_gpu_layers: opts?.nGpuLayers ?? 999,
+          ctx_size: opts?.ctxSize ?? 4096,
           port: 8137,
         },
       });
       setServer(status);
+      setEstimate(null);
     } catch (e) {
       setServer({
         running: false,
@@ -110,6 +119,25 @@ function App() {
       });
     } finally {
       setLaunching(null);
+    }
+  }
+
+  async function autoConfig(model: ModelEntry) {
+    setEstimating(model.path);
+    setError(null);
+    try {
+      const data = await invoke<VramEstimate>("estimate_config", {
+        modelPath: model.path,
+      });
+      setEstimate({
+        path: model.path,
+        name: model.metadata?.name ?? model.file_name,
+        data,
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setEstimating(null);
     }
   }
 
@@ -153,6 +181,19 @@ function App() {
       <TelemetryCockpit />
 
       <ServerBar status={server} onStop={stop} />
+
+      {estimate && (
+        <AutoConfigPanel
+          name={estimate.name}
+          estimate={estimate.data}
+          launching={launching === estimate.path}
+          onLaunch={(ngl, ctx) => {
+            const model = models.find((m) => m.path === estimate.path);
+            if (model) launch(model, { nGpuLayers: ngl, ctxSize: ctx });
+          }}
+          onDismiss={() => setEstimate(null)}
+        />
+      )}
 
       <header className="app-header">
         <div>
@@ -229,13 +270,23 @@ function App() {
                     {server?.running && server.model_path === m.path ? (
                       <span className="src">running</span>
                     ) : (
-                      <button
-                        className="launch-btn"
-                        disabled={launching !== null || !!m.parse_error}
-                        onClick={() => launch(m)}
-                      >
-                        {launching === m.path ? "Launching…" : "Launch"}
-                      </button>
+                      <div className="row-actions">
+                        <button
+                          className="auto-btn"
+                          disabled={estimating !== null || !!m.parse_error}
+                          onClick={() => autoConfig(m)}
+                          title="Estimate optimal config for your GPU"
+                        >
+                          {estimating === m.path ? "…" : "⚙ Auto"}
+                        </button>
+                        <button
+                          className="launch-btn"
+                          disabled={launching !== null || !!m.parse_error}
+                          onClick={() => launch(m)}
+                        >
+                          {launching === m.path ? "Launching…" : "Launch"}
+                        </button>
+                      </div>
                     )}
                   </td>
                 </tr>

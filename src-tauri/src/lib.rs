@@ -1,10 +1,14 @@
+mod estimator;
 mod gguf;
 mod llama;
 mod scanner;
 mod telemetry;
 
+use std::path::Path;
+
 use tauri::State;
 
+use estimator::VramEstimate;
 use llama::{LlamaBinary, LlamaManager, LlamaServerConfig, ServerStatus};
 use scanner::{ModelEntry, ScanRoot};
 use telemetry::{TelemetrySnapshot, TelemetryState};
@@ -54,6 +58,39 @@ fn llama_status(state: State<'_, LlamaManager>) -> ServerStatus {
     state.status()
 }
 
+/// Estimate the optimal GPU-offload + context config for a model on this GPU.
+#[tauri::command]
+fn estimate_config(
+    telemetry: State<'_, TelemetryState>,
+    model_path: String,
+) -> Result<VramEstimate, String> {
+    let path = Path::new(&model_path);
+    let md = gguf::read_gguf_metadata(path).map_err(|e| e.to_string())?;
+    let file_size = std::fs::metadata(path)
+        .map(|m| m.len())
+        .map_err(|e| e.to_string())?;
+
+    let snap = telemetry.snapshot();
+    let (gpu_total, gpu_free) = snap
+        .gpus
+        .first()
+        .map(|g| {
+            (
+                g.vram_total_bytes,
+                g.vram_total_bytes.saturating_sub(g.vram_used_bytes),
+            )
+        })
+        .unwrap_or((0, 0));
+    if gpu_total == 0 {
+        return Err("no GPU detected to estimate against".into());
+    }
+
+    let mut notes = Vec::new();
+    let shape = estimator::shape_from_metadata(&md, file_size, &mut notes)
+        .ok_or_else(|| "insufficient model metadata to estimate".to_string())?;
+    Ok(estimator::estimate(&shape, gpu_total, gpu_free, notes))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -67,7 +104,8 @@ pub fn run() {
             llama_binaries,
             llama_start,
             llama_stop,
-            llama_status
+            llama_status,
+            estimate_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

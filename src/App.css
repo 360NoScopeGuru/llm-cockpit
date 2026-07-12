@@ -162,3 +162,22 @@ button:disabled {
   font-size: 12px;
   color: var(--muted);
 }
+
+.row-actions {
+  display: flex;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.auto-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.auto-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}

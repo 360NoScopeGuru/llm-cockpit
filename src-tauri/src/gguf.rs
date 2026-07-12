@@ -96,6 +96,10 @@ pub struct GgufMetadata {
     pub context_length: Option<u64>,
     pub block_count: Option<u64>,
     pub embedding_length: Option<u64>,
+    pub head_count: Option<u64>,
+    pub head_count_kv: Option<u64>,
+    pub key_length: Option<u64>,
+    pub value_length: Option<u64>,
     pub parameter_count: Option<u64>,
     pub size_label: Option<String>,
     /// For sharded models: total shard count and this file's 1-based index.
@@ -302,6 +306,10 @@ pub fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata, GgufErro
         context_length: arch_key("context_length"),
         block_count: arch_key("block_count"),
         embedding_length: arch_key("embedding_length"),
+        head_count: arch_key("attention.head_count"),
+        head_count_kv: arch_key("attention.head_count_kv"),
+        key_length: arch_key("attention.key_length"),
+        value_length: arch_key("attention.value_length"),
         parameter_count: kv.get("general.parameter_count").and_then(|v| v.as_u64()),
         size_label: kv
             .get("general.size_label")

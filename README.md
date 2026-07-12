@@ -16,7 +16,8 @@ hardware, then runs it under live telemetry.
    add; read GGUF metadata directly (arch, quant, context length) with zero
    re-downloading. *(done: parser + scanner + library view)*
 2. **Hardware-aware auto-config + benchmarking** — estimate then *measure* the
-   Pareto-optimal quant/context/GPU-layer config for your GPU. *(planned)*
+   Pareto-optimal quant/context/GPU-layer config for your GPU. *(tier 1 done:
+   VRAM-fit estimator; measured benchmark pending)*
 3. **Live telemetry cockpit** — VRAM/util/temp/power + tokens/sec, prefill-vs-decode
    split, KV-cache occupancy while generating. *(done: GPU + system telemetry;
    inference-side metrics pending llama-server integration)*
@@ -45,14 +46,20 @@ Rust backend (`src-tauri/src/`):
   GPU layers / context, and tracks lifecycle + `/health`. Commands:
   `llama_binaries`, `llama_start`, `llama_stop`, `llama_status`. Verified by
   launching a real 4B model on the RTX 5080 (load → healthy → stop).
+- `estimator.rs` — hardware-aware auto-config (tier 1). From a model's GGUF shape
+  + the GPU's VRAM, computes the max GPU-offload layers + context that fit
+  (weights + KV-cache + overhead vs a headroom budget). Command: `estimate_config`.
+  Verified against real models on the RTX 5080.
 
 Frontend (`src/`):
 - `Telemetry.tsx` — cockpit panel polling `gpu_telemetry` once a second with
   color-coded meters.
 - `ServerBar.tsx` — server status bar (health dot, model, binary, base URL, Stop)
   polling `llama_status`.
-- `App.tsx` — model library view (arch, quant, context, size, source) with a
-  per-model Launch button.
+- `AutoConfig.tsx` — recommendation panel (full/partial offload, layers, context)
+  with a stacked VRAM-breakdown bar and a launch-with-this-config button.
+- `App.tsx` — model library view (arch, quant, context, size, source) with
+  per-model Auto-config + Launch buttons.
 
 ## Develop
 
