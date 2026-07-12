@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { TelemetryCockpit } from "./Telemetry";
+import { ServerBar, ServerStatus } from "./ServerBar";
 import "./App.css";
 
 // Mirrors the serde output of the Rust `scanner`/`gguf` modules (snake_case).
@@ -64,6 +65,8 @@ function App() {
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [server, setServer] = useState<ServerStatus | null>(null);
+  const [launching, setLaunching] = useState<string | null>(null);
 
   async function rescan() {
     setScanning(true);
@@ -82,8 +85,64 @@ function App() {
     }
   }
 
+  async function launch(model: ModelEntry) {
+    setLaunching(model.path);
+    try {
+      const status = await invoke<ServerStatus>("llama_start", {
+        config: {
+          model_path: model.path,
+          n_gpu_layers: 999,
+          ctx_size: 4096,
+          port: 8137,
+        },
+      });
+      setServer(status);
+    } catch (e) {
+      setServer({
+        running: false,
+        health: "error",
+        pid: null,
+        base_url: null,
+        model_path: model.path,
+        binary_label: null,
+        uptime_ms: null,
+        error: String(e),
+      });
+    } finally {
+      setLaunching(null);
+    }
+  }
+
+  async function stop() {
+    try {
+      await invoke("llama_stop");
+    } catch {
+      /* ignore */
+    }
+    setServer(await invoke<ServerStatus>("llama_status"));
+  }
+
   useEffect(() => {
     rescan();
+  }, []);
+
+  // Poll server status so health transitions (loading → ok) show live.
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const s = await invoke<ServerStatus>("llama_status");
+        if (alive) setServer(s);
+      } catch {
+        /* ignore */
+      }
+    };
+    poll();
+    const id = setInterval(poll, 1500);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, []);
 
   // Primary list hides continuation shards of split models.
@@ -92,6 +151,8 @@ function App() {
   return (
     <main className="app">
       <TelemetryCockpit />
+
+      <ServerBar status={server} onStop={stop} />
 
       <header className="app-header">
         <div>
@@ -137,6 +198,7 @@ function App() {
               <th>Params</th>
               <th>Size</th>
               <th>Source</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -162,6 +224,19 @@ function App() {
                   <td>{formatBytes(m.size_bytes)}</td>
                   <td>
                     <span className="src">{sourceLabel(m.source)}</span>
+                  </td>
+                  <td>
+                    {server?.running && server.model_path === m.path ? (
+                      <span className="src">running</span>
+                    ) : (
+                      <button
+                        className="launch-btn"
+                        disabled={launching !== null || !!m.parse_error}
+                        onClick={() => launch(m)}
+                      >
+                        {launching === m.path ? "Launching…" : "Launch"}
+                      </button>
+                    )}
                   </td>
                 </tr>
               );

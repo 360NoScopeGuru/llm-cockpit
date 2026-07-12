@@ -27,4 +27,5 @@ dirs = "5"
 thiserror = "1"
 nvml-wrapper = "0.12"
 sysinfo = "0.39"
+ureq = "2"
 

@@ -39,11 +39,20 @@ Rust backend (`src-tauri/src/`):
 - `telemetry.rs` — live GPU telemetry via NVML (VRAM, util, temp, power, clocks)
   plus system RAM/CPU via sysinfo, held in Tauri managed state. Command:
   `gpu_telemetry`. Verified against a real RTX 5080.
+- `llama.rs` — `llama-server` process manager. Resolves a llama.cpp binary
+  (prefers CUDA; discovers LM Studio's bundled builds and injects their sibling
+  `vendor/` DLL dirs into the child PATH), launches a model with configurable
+  GPU layers / context, and tracks lifecycle + `/health`. Commands:
+  `llama_binaries`, `llama_start`, `llama_stop`, `llama_status`. Verified by
+  launching a real 4B model on the RTX 5080 (load → healthy → stop).
 
 Frontend (`src/`):
 - `Telemetry.tsx` — cockpit panel polling `gpu_telemetry` once a second with
   color-coded meters.
-- `App.tsx` — model library view listing arch, quant, context, size, source.
+- `ServerBar.tsx` — server status bar (health dot, model, binary, base URL, Stop)
+  polling `llama_status`.
+- `App.tsx` — model library view (arch, quant, context, size, source) with a
+  per-model Launch button.
 
 ## Develop
 
