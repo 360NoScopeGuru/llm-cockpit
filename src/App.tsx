@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { TelemetryCockpit } from "./Telemetry";
 import "./App.css";
 
 // Mirrors the serde output of the Rust `scanner`/`gguf` modules (snake_case).
@@ -90,6 +91,8 @@ function App() {
 
   return (
     <main className="app">
+      <TelemetryCockpit />
+
       <header className="app-header">
         <div>
           <h1>Model Library</h1>
