@@ -92,6 +92,37 @@ button:disabled {
   font-style: normal;
 }
 
+.chip-remove {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.chip-remove:hover {
+  color: #f85149;
+}
+
+.add-folder {
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.add-folder:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge.vision {
+  background: rgba(47, 129, 247, 0.18);
+  color: var(--accent);
+}
+
 .error {
   background: rgba(210, 60, 60, 0.15);
   border: 1px solid rgba(210, 60, 60, 0.4);

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { open } from "@tauri-apps/plugin-dialog";
 import { TelemetryCockpit } from "./Telemetry";
 import { ServerBar, ServerStatus } from "./ServerBar";
 import { AutoConfigPanel, VramEstimate } from "./AutoConfig";
@@ -29,8 +30,14 @@ interface ModelEntry {
   source: string;
   is_shard_continuation: boolean;
   shard_total: number | null;
+  is_mmproj: boolean;
   metadata: GgufMetadata | null;
   parse_error: string | null;
+}
+
+/** Directory portion of a model path (used to pair mmproj files with parents). */
+function dirOf(path: string): string {
+  return path.slice(0, Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")));
 }
 
 interface ScanRoot {
@@ -201,6 +208,26 @@ function App() {
     }
   }
 
+  async function addFolder() {
+    try {
+      const dir = await open({ directory: true, title: "Add a model folder" });
+      if (typeof dir !== "string" || !dir) return;
+      await invoke("add_model_dir", { dir });
+      await rescan();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function removeFolder(dir: string) {
+    try {
+      await invoke("remove_model_dir", { dir });
+      await rescan();
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   useEffect(() => {
     rescan();
   }, []);
@@ -224,8 +251,12 @@ function App() {
     };
   }, []);
 
-  // Primary list hides continuation shards of split models.
-  const primary = models.filter((m) => !m.is_shard_continuation);
+  // Primary list hides continuation shards and mmproj companion files; the
+  // latter surface as a "vision" badge on models sharing their directory.
+  const primary = models.filter((m) => !m.is_shard_continuation && !m.is_mmproj);
+  const visionDirs = new Set(
+    models.filter((m) => m.is_mmproj).map((m) => dirOf(m.path))
+  );
 
   return (
     <main className="app">
@@ -276,8 +307,20 @@ function App() {
             {sourceLabel(r.source)}
             <code>{r.path}</code>
             {!r.exists && <em>not found</em>}
+            {r.source === "folder" && (
+              <button
+                className="chip-remove"
+                title="Remove this folder"
+                onClick={() => removeFolder(r.path)}
+              >
+                ✕
+              </button>
+            )}
           </span>
         ))}
+        <button className="add-folder" onClick={addFolder}>
+          + Add folder
+        </button>
       </section>
 
       {error && <div className="error">Scan failed: {error}</div>}
@@ -312,6 +355,11 @@ function App() {
                     {md?.name ?? m.file_name}
                     {m.shard_total && (
                       <span className="badge">{m.shard_total} shards</span>
+                    )}
+                    {visionDirs.has(dirOf(m.path)) && (
+                      <span className="badge vision" title="Has a multimodal projector (mmproj) companion file">
+                        vision
+                      </span>
                     )}
                     {m.parse_error && (
                       <span className="badge warn" title={m.parse_error}>

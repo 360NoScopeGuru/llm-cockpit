@@ -3,6 +3,7 @@ mod estimator;
 mod gguf;
 mod llama;
 mod scanner;
+mod settings;
 mod telemetry;
 
 use std::path::Path;
@@ -14,16 +15,39 @@ use llama::{InferenceMetrics, LlamaBinary, LlamaManager, LlamaServerConfig, Serv
 use scanner::{ModelEntry, ScanRoot};
 use telemetry::{TelemetrySnapshot, TelemetryState};
 
-/// Scan default caches + any extra folders for GGUF models the user already has.
+/// Scan default caches + persisted user folders + any extra ad-hoc folders.
 #[tauri::command]
 fn scan_models(extra_dirs: Vec<String>) -> Vec<ModelEntry> {
-    scanner::scan_models(&extra_dirs)
+    let mut dirs = settings::load().extra_model_dirs;
+    dirs.extend(extra_dirs);
+    scanner::scan_models(&dirs)
 }
 
-/// Report the default scan roots and whether each exists (for the settings UI).
+/// Report all scan roots — defaults plus persisted user folders — and whether
+/// each currently exists (for the roots UI).
 #[tauri::command]
 fn scan_roots() -> Vec<ScanRoot> {
-    scanner::default_roots_info()
+    let mut roots = scanner::default_roots_info();
+    for dir in settings::load().extra_model_dirs {
+        roots.push(ScanRoot {
+            exists: Path::new(&dir).is_dir(),
+            path: dir,
+            source: "folder".into(),
+        });
+    }
+    roots
+}
+
+/// Persist a new model folder to scan. Returns the updated settings.
+#[tauri::command]
+fn add_model_dir(dir: String) -> Result<settings::Settings, String> {
+    settings::add_model_dir(&dir)
+}
+
+/// Remove a persisted model folder. Returns the updated settings.
+#[tauri::command]
+fn remove_model_dir(dir: String) -> Result<settings::Settings, String> {
+    settings::remove_model_dir(&dir)
 }
 
 /// One live snapshot of GPU + system telemetry. Polled by the frontend.
@@ -119,11 +143,14 @@ fn benchmark_model(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .manage(TelemetryState::new())
         .manage(LlamaManager::new())
         .invoke_handler(tauri::generate_handler![
             scan_models,
             scan_roots,
+            add_model_dir,
+            remove_model_dir,
             gpu_telemetry,
             llama_binaries,
             llama_start,

@@ -31,6 +31,9 @@ pub struct ModelEntry {
     /// True for shard 2..N of a split model — hidden from the primary list.
     pub is_shard_continuation: bool,
     pub shard_total: Option<u32>,
+    /// True for multimodal projector companion files (mmproj-*, arch "clip") —
+    /// grouped under their parent model rather than listed standalone.
+    pub is_mmproj: bool,
     pub metadata: Option<GgufMetadata>,
     pub parse_error: Option<String>,
 }
@@ -138,6 +141,12 @@ fn build_entry(path: &Path, source: &str) -> ModelEntry {
         Err(e) => (None, Some(e.to_string())),
     };
 
+    let is_mmproj = is_mmproj_name(&file_name)
+        || metadata
+            .as_ref()
+            .map(|m| m.architecture.as_deref() == Some("clip"))
+            .unwrap_or(false);
+
     ModelEntry {
         path: path.to_string_lossy().into_owned(),
         file_name,
@@ -145,9 +154,15 @@ fn build_entry(path: &Path, source: &str) -> ModelEntry {
         source: source.to_string(),
         is_shard_continuation: shard.map(|(i, _)| i > 1).unwrap_or(false),
         shard_total: shard.map(|(_, t)| t),
+        is_mmproj,
         metadata,
         parse_error,
     }
+}
+
+/// llama.cpp convention: multimodal projector files are named `mmproj-…`.
+fn is_mmproj_name(file_name: &str) -> bool {
+    file_name.to_ascii_lowercase().starts_with("mmproj")
 }
 
 fn is_gguf(path: &Path) -> bool {
@@ -178,6 +193,13 @@ mod tests {
         assert_eq!(shard_index("model-00002-of-00003.gguf"), Some((2, 3)));
         assert_eq!(shard_index("plain-model.gguf"), None);
         assert_eq!(shard_index("not-a-model.txt"), None);
+    }
+
+    #[test]
+    fn detects_mmproj_by_name() {
+        assert!(is_mmproj_name("mmproj-Qwen3.6-27B-BF16.gguf"));
+        assert!(is_mmproj_name("MMPROJ-model.gguf"));
+        assert!(!is_mmproj_name("Qwen3.6-27B-Q4_K_M.gguf"));
     }
 
     /// Real end-to-end scan of whatever models are on this machine's caches.

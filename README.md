@@ -36,8 +36,12 @@ hardware, then runs it under live telemetry.
 Rust backend (`src-tauri/src/`):
 - `gguf.rs` — GGUF v2/v3 metadata parser (header + KV block only; skips large
   arrays in-place). Unit-tested against synthetic files.
-- `scanner.rs` — cache scanner (HF / LM Studio / folders) with shard grouping.
-  Commands: `scan_models`, `scan_roots`. Verified against real local models.
+- `scanner.rs` — cache scanner (HF / LM Studio / folders) with shard grouping and
+  mmproj (multimodal projector) detection. Commands: `scan_models`, `scan_roots`.
+  Verified against real local models.
+- `settings.rs` — persisted settings (JSON in the OS config dir); currently the
+  user's extra model folders, merged into every scan. Commands: `add_model_dir`,
+  `remove_model_dir`.
 - `telemetry.rs` — live GPU telemetry via NVML (VRAM, util, temp, power, clocks)
   plus system RAM/CPU via sysinfo, held in Tauri managed state. Command:
   `gpu_telemetry`. Verified against a real RTX 5080.
@@ -70,7 +74,9 @@ Frontend (`src/`):
 - `Benchmark.tsx` — measured-benchmark panel with a live-updating results table
   (load time, prefill/decode tok/s, peak VRAM) that highlights the fastest config.
 - `App.tsx` — model library view (arch, quant, context, size, source) with
-  per-model Auto-config, Bench, and Launch buttons.
+  per-model Auto-config, Bench, and Launch buttons. mmproj companion files are
+  folded into a "vision" badge on their parent model, and custom model folders
+  can be added/removed via a native folder picker (persisted across restarts).
 
 ## Develop
 
