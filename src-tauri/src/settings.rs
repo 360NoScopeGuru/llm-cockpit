@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 pub struct Settings {
     #[serde(default)]
     pub extra_model_dirs: Vec<String>,
+    /// Full path of the llama-server binary the user picked; falls back to the
+    /// best-ranked discovered binary when unset or missing on disk.
+    #[serde(default)]
+    pub preferred_binary: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -59,6 +63,19 @@ pub fn add_model_dir(dir: &str) -> Result<Settings, String> {
 pub fn remove_model_dir(dir: &str) -> Result<Settings, String> {
     let mut s = load();
     s.extra_model_dirs.retain(|d| !d.eq_ignore_ascii_case(dir));
+    save(&s)?;
+    Ok(s)
+}
+
+/// Persist the preferred llama-server binary (None restores auto-select).
+pub fn set_preferred_binary(path: Option<String>) -> Result<Settings, String> {
+    if let Some(p) = &path {
+        if !PathBuf::from(p).is_file() {
+            return Err(format!("binary not found: {p}"));
+        }
+    }
+    let mut s = load();
+    s.preferred_binary = path;
     save(&s)?;
     Ok(s)
 }

@@ -120,15 +120,23 @@ impl LlamaManager {
             let _ = old.child.wait();
         }
 
-        let binary = match &cfg.binary_path {
-            Some(p) => LlamaBinary {
-                label: format!("custom ({p})"),
-                backend: "unknown".into(),
-                source: "path".into(),
-                rank: 0,
-                path: p.clone(),
-            },
-            None => best_binary().ok_or_else(|| {
+        // Explicit binary > persisted preference (if it still exists) > best-ranked.
+        let preferred = cfg
+            .binary_path
+            .clone()
+            .or_else(|| crate::settings::load().preferred_binary);
+        let binary = match preferred {
+            Some(p) if Path::new(&p).is_file() => resolve_binaries()
+                .into_iter()
+                .find(|b| b.path.eq_ignore_ascii_case(&p))
+                .unwrap_or(LlamaBinary {
+                    label: format!("custom ({p})"),
+                    backend: "unknown".into(),
+                    source: "path".into(),
+                    rank: 0,
+                    path: p,
+                }),
+            _ => best_binary().ok_or_else(|| {
                 "no llama-server binary found (looked on PATH and in LM Studio backends)"
                     .to_string()
             })?,
@@ -205,15 +213,17 @@ impl LlamaManager {
         Ok(())
     }
 
+    /// Base URL of the running server, if any.
+    pub fn base_url(&self) -> Option<String> {
+        let guard = self.inner.lock().unwrap();
+        guard.as_ref().map(|s| s.base_url.clone())
+    }
+
     /// Scrape the running server's `/metrics`. Returns None if nothing is
-    /// running. Releases the lock before the HTTP call so status polling on
+    /// running. The lock is released before the HTTP call so status polling on
     /// another thread isn't blocked.
     pub fn metrics(&self) -> Option<InferenceMetrics> {
-        let base = {
-            let guard = self.inner.lock().unwrap();
-            guard.as_ref().map(|s| s.base_url.clone())
-        }?;
-        fetch_metrics(&base)
+        fetch_metrics(&self.base_url()?)
     }
 
     pub fn status(&self) -> ServerStatus {
@@ -241,6 +251,20 @@ impl LlamaManager {
 impl Default for LlamaManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Never leave a llama-server orphaned: kill the child when the manager is
+/// dropped (app exit, or a panicking test unwinding). Also matters because an
+/// orphan holds inherited pipe handles, wedging whatever spawned *us*.
+impl Drop for LlamaManager {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            if let Some(server) = guard.as_mut() {
+                let _ = server.child.kill();
+                let _ = server.child.wait();
+            }
+        }
     }
 }
 

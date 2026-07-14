@@ -1,97 +1,58 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { TelemetryCockpit } from "./Telemetry";
-import { ServerBar, ServerStatus } from "./ServerBar";
-import { AutoConfigPanel, VramEstimate } from "./AutoConfig";
-import { BenchmarkPanel, BenchResult } from "./Benchmark";
-import "./App.css";
+import { Core, CoreGhost } from "./Core";
+import { Hangar } from "./Hangar";
+import { Rail } from "./Rail";
+import { Console } from "./Console";
+import {
+  BenchResult,
+  InferenceMetrics,
+  LlamaBinary,
+  ModelEntry,
+  ScanRoot,
+  ServerStatus,
+  Settings,
+  TelemetrySnapshot,
+  VramEstimate,
+  baseName,
+  dirOf,
+  modelLabel,
+} from "./types";
+import "./styles.css";
 
-// Mirrors the serde output of the Rust `scanner`/`gguf` modules (snake_case).
-interface GgufMetadata {
-  version: number;
-  tensor_count: number;
-  architecture: string | null;
-  name: string | null;
-  quant_label: string | null;
-  context_length: number | null;
-  block_count: number | null;
-  embedding_length: number | null;
-  parameter_count: number | null;
-  size_label: string | null;
-  split_count: number | null;
-}
+const PORT = 8137;
 
-interface ModelEntry {
-  path: string;
-  file_name: string;
-  size_bytes: number;
-  source: string;
-  is_shard_continuation: boolean;
-  shard_total: number | null;
-  is_mmproj: boolean;
-  metadata: GgufMetadata | null;
-  parse_error: string | null;
-}
-
-/** Directory portion of a model path (used to pair mmproj files with parents). */
-function dirOf(path: string): string {
-  return path.slice(0, Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")));
-}
-
-interface ScanRoot {
-  path: string;
-  source: string;
-  exists: boolean;
-}
-
-function formatBytes(n: number): string {
-  if (n <= 0) return "—";
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
-  return `${(n / Math.pow(1024, i)).toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
-}
-
-function formatCtx(n: number | null): string {
-  if (!n) return "—";
-  if (n >= 1024) return `${Math.round(n / 1024)}K`;
-  return String(n);
-}
-
-function sourceLabel(source: string): string {
-  switch (source) {
-    case "huggingface":
-      return "HF";
-    case "lm-studio":
-      return "LM Studio";
-    default:
-      return "Folder";
-  }
-}
-
-function App() {
+export default function App() {
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [telemetry, setTelemetry] = useState<TelemetrySnapshot | null>(null);
+  const [metrics, setMetrics] = useState<InferenceMetrics | null>(null);
   const [server, setServer] = useState<ServerStatus | null>(null);
-  const [launching, setLaunching] = useState<string | null>(null);
-  const [estimate, setEstimate] = useState<
-    { path: string; name: string; data: VramEstimate } | null
-  >(null);
-  const [estimating, setEstimating] = useState<string | null>(null);
+  const [estimates, setEstimates] = useState<Map<string, VramEstimate>>(new Map());
+  const [hoverPath, setHoverPath] = useState<string | null>(null);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const [launching, setLaunching] = useState(false);
   const [bench, setBench] = useState<{
     path: string;
     name: string;
     expected: number;
     results: BenchResult[];
   } | null>(null);
-  const [benching, setBenching] = useState<string | null>(null);
+  const [benching, setBenching] = useState(false);
+  const [binaries, setBinaries] = useState<LlamaBinary[]>([]);
+  const [settings, setSettings] = useState<Settings | null>(null);
+
+  const estimatesRef = useRef(estimates);
+  estimatesRef.current = estimates;
+
+  // ---- scanning + estimates ----
 
   async function rescan() {
     setScanning(true);
-    setError(null);
     try {
       const [rootList, modelList] = await Promise.all([
         invoke<ScanRoot[]>("scan_roots"),
@@ -99,6 +60,16 @@ function App() {
       ]);
       setRoots(rootList);
       setModels(modelList);
+      // Prime fit estimates for every primary model (cheap: header + NVML).
+      for (const m of modelList) {
+        if (m.is_shard_continuation || m.is_mmproj || m.parse_error) continue;
+        if (estimatesRef.current.has(m.path)) continue;
+        invoke<VramEstimate>("estimate_config", { modelPath: m.path })
+          .then((est) =>
+            setEstimates((prev) => new Map(prev).set(m.path, est))
+          )
+          .catch(() => {});
+      }
     } catch (e) {
       setError(String(e));
     } finally {
@@ -106,54 +77,69 @@ function App() {
     }
   }
 
-  async function launch(
-    model: ModelEntry,
-    opts?: { nGpuLayers?: number; ctxSize?: number }
-  ) {
-    setLaunching(model.path);
+  useEffect(() => {
+    rescan();
+    invoke<LlamaBinary[]>("llama_binaries").then(setBinaries).catch(() => {});
+    invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+  }, []);
+
+  // ---- polling ----
+
+  useEffect(() => {
+    let alive = true;
+    const fast = setInterval(async () => {
+      try {
+        const [t, m] = await Promise.all([
+          invoke<TelemetrySnapshot>("gpu_telemetry"),
+          invoke<InferenceMetrics | null>("inference_metrics"),
+        ]);
+        if (alive) {
+          setTelemetry(t);
+          setMetrics(m);
+        }
+      } catch {
+        /* transient */
+      }
+    }, 1000);
+    const slow = setInterval(async () => {
+      try {
+        const s = await invoke<ServerStatus>("llama_status");
+        if (alive) setServer(s);
+      } catch {
+        /* transient */
+      }
+    }, 1500);
+    return () => {
+      alive = false;
+      clearInterval(fast);
+      clearInterval(slow);
+    };
+  }, []);
+
+  // ---- launch / stop ----
+
+  async function ignite(m: ModelEntry, ngl?: number, ctx?: number) {
+    setLaunching(true);
+    setError(null);
     try {
+      let est = estimates.get(m.path);
+      if (!est && ngl === undefined) {
+        est = await invoke<VramEstimate>("estimate_config", { modelPath: m.path });
+        setEstimates((prev) => new Map(prev).set(m.path, est!));
+      }
       const status = await invoke<ServerStatus>("llama_start", {
         config: {
-          model_path: model.path,
-          n_gpu_layers: opts?.nGpuLayers ?? 999,
-          ctx_size: opts?.ctxSize ?? 4096,
-          port: 8137,
+          model_path: m.path,
+          n_gpu_layers: ngl ?? est?.n_gpu_layers ?? 999,
+          ctx_size: ctx ?? est?.ctx_size ?? 4096,
+          port: PORT,
         },
       });
       setServer(status);
-      setEstimate(null);
-    } catch (e) {
-      setServer({
-        running: false,
-        health: "error",
-        pid: null,
-        base_url: null,
-        model_path: model.path,
-        binary_label: null,
-        uptime_ms: null,
-        error: String(e),
-      });
-    } finally {
-      setLaunching(null);
-    }
-  }
-
-  async function autoConfig(model: ModelEntry) {
-    setEstimating(model.path);
-    setError(null);
-    try {
-      const data = await invoke<VramEstimate>("estimate_config", {
-        modelPath: model.path,
-      });
-      setEstimate({
-        path: model.path,
-        name: model.metadata?.name ?? model.file_name,
-        data,
-      });
     } catch (e) {
       setError(String(e));
     } finally {
-      setEstimating(null);
+      setLaunching(false);
     }
   }
 
@@ -166,47 +152,46 @@ function App() {
     setServer(await invoke<ServerStatus>("llama_status"));
   }
 
-  async function benchmark(model: ModelEntry) {
-    setBenching(model.path);
+  // ---- benchmark ----
+
+  async function runBench(m: ModelEntry) {
+    setBenching(true);
     setError(null);
-    const name = model.metadata?.name ?? model.file_name;
+    const name = modelLabel(m);
     try {
-      // Derive a 2-config sweep: the recommended config vs a reduced-offload one
-      // to expose the GPU-offload speed cliff.
-      const est = await invoke<VramEstimate>("estimate_config", {
-        modelPath: model.path,
-      });
-      const rec = est.n_gpu_layers;
-      const reduced = Math.max(1, Math.floor(rec / 3));
+      let est = estimates.get(m.path);
+      if (!est) {
+        est = await invoke<VramEstimate>("estimate_config", { modelPath: m.path });
+      }
+      const reduced = Math.max(1, Math.floor(est.n_gpu_layers / 3));
       const configs = [
-        { n_gpu_layers: rec, ctx_size: est.ctx_size },
+        { n_gpu_layers: est.n_gpu_layers, ctx_size: est.ctx_size },
         { n_gpu_layers: reduced, ctx_size: est.ctx_size },
       ];
-      setBench({ path: model.path, name, expected: configs.length, results: [] });
-
+      setBench({ path: m.path, name, expected: configs.length, results: [] });
       const unlisten = await listen<BenchResult>("benchmark-progress", (e) => {
         setBench((prev) =>
-          prev && prev.path === model.path
+          prev && prev.path === m.path
             ? { ...prev, results: [...prev.results, e.payload] }
             : prev
         );
       });
       const final = await invoke<BenchResult[]>("benchmark_model", {
-        modelPath: model.path,
+        modelPath: m.path,
         configs,
       });
       unlisten();
-      setBench((prev) =>
-        prev && prev.path === model.path ? { ...prev, results: final } : prev
-      );
+      setBench((prev) => (prev && prev.path === m.path ? { ...prev, results: final } : prev));
     } catch (e) {
       setError(String(e));
       setBench(null);
     } finally {
-      setBenching(null);
+      setBenching(false);
       setServer(await invoke<ServerStatus>("llama_status"));
     }
   }
+
+  // ---- folders / binary ----
 
   async function addFolder() {
     try {
@@ -228,192 +213,125 @@ function App() {
     }
   }
 
-  useEffect(() => {
-    rescan();
-  }, []);
+  async function pickBinary(path: string) {
+    try {
+      const s = await invoke<Settings>("set_preferred_binary", {
+        path: path === "" ? null : path,
+      });
+      setSettings(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
-  // Poll server status so health transitions (loading → ok) show live.
-  useEffect(() => {
-    let alive = true;
-    const poll = async () => {
-      try {
-        const s = await invoke<ServerStatus>("llama_status");
-        if (alive) setServer(s);
-      } catch {
-        /* ignore */
-      }
-    };
-    poll();
-    const id = setInterval(poll, 1500);
-    return () => {
-      alive = false;
-      clearInterval(id);
-    };
-  }, []);
+  // ---- derived ----
 
-  // Primary list hides continuation shards and mmproj companion files; the
-  // latter surface as a "vision" badge on models sharing their directory.
   const primary = models.filter((m) => !m.is_shard_continuation && !m.is_mmproj);
-  const visionDirs = new Set(
-    models.filter((m) => m.is_mmproj).map((m) => dirOf(m.path))
-  );
+  const visionDirs = new Set(models.filter((m) => m.is_mmproj).map((m) => dirOf(m.path)));
+  const busy = launching || benching;
+  const runningPath = server?.running ? server.model_path : null;
+  const selected = primary.find((m) => m.path === selectedPath) ?? null;
+  const hoverEst = hoverPath && hoverPath !== runningPath ? estimates.get(hoverPath) : null;
+  const ghost: CoreGhost | null = hoverEst
+    ? {
+        bytes: hoverEst.est_weights_bytes + hoverEst.est_kv_bytes + hoverEst.est_overhead_bytes,
+        fits: hoverEst.fits,
+      }
+    : null;
+  const gpu = telemetry?.gpus[0] ?? null;
+  const health = server?.running ? server.health : "stopped";
+  const runningModel = primary.find((m) => m.path === runningPath);
 
   return (
-    <main className="app">
-      <TelemetryCockpit />
-
-      <ServerBar status={server} onStop={stop} />
-
-      {estimate && (
-        <AutoConfigPanel
-          name={estimate.name}
-          estimate={estimate.data}
-          launching={launching === estimate.path}
-          onLaunch={(ngl, ctx) => {
-            const model = models.find((m) => m.path === estimate.path);
-            if (model) launch(model, { nGpuLayers: ngl, ctxSize: ctx });
-          }}
-          onDismiss={() => setEstimate(null)}
-        />
-      )}
-
-      {bench && (
-        <BenchmarkPanel
-          name={bench.name}
-          results={bench.results}
-          running={benching === bench.path}
-          expected={bench.expected}
-          onDismiss={() => setBench(null)}
-        />
-      )}
-
-      <header className="app-header">
-        <div>
-          <h1>Model Library</h1>
-          <p className="subtitle">
-            {scanning
-              ? "Scanning caches…"
-              : `${primary.length} model${primary.length === 1 ? "" : "s"} found`}
-          </p>
-        </div>
-        <button onClick={rescan} disabled={scanning}>
-          {scanning ? "Scanning…" : "Rescan"}
-        </button>
+    <div className="shell">
+      <header className="hdr">
+        <span className="wordmark">
+          <span className="hex">⬢</span> LLM<span className="dim">·</span>COCKPIT
+        </span>
+        <span className="hdr-spacer" />
+        <span className="status-chip">
+          <span className={`dot ${health === "ok" ? "ok" : health === "loading" || health === "starting" ? "loading" : health === "error" ? "error" : ""}`} />
+          {server?.running ? (
+            <>
+              <span className="model-name">{baseName(server.model_path ?? "")}</span>
+              <span className="sub">{server.binary_label}</span>
+            </>
+          ) : benching ? (
+            <span className="sub">benchmark in progress…</span>
+          ) : (
+            <span className="sub">core idle</span>
+          )}
+        </span>
+        <select
+          value={settings?.preferred_binary ?? ""}
+          onChange={(e) => pickBinary(e.target.value)}
+          title="llama-server binary (applies to the next ignition)"
+        >
+          <option value="">auto · {binaries[0]?.label ?? "no binary found"}</option>
+          {binaries.map((b) => (
+            <option key={b.path} value={b.path}>
+              {b.label}
+            </option>
+          ))}
+        </select>
+        {server?.running && (
+          <button className="stop-btn" onClick={stop}>
+            SHUTDOWN
+          </button>
+        )}
       </header>
 
-      <section className="roots">
-        {roots.map((r) => (
-          <span key={r.path} className={`root-chip ${r.exists ? "" : "missing"}`}>
-            {sourceLabel(r.source)}
-            <code>{r.path}</code>
-            {!r.exists && <em>not found</em>}
-            {r.source === "folder" && (
-              <button
-                className="chip-remove"
-                title="Remove this folder"
-                onClick={() => removeFolder(r.path)}
-              >
-                ✕
-              </button>
-            )}
-          </span>
-        ))}
-        <button className="add-folder" onClick={addFolder}>
-          + Add folder
-        </button>
-      </section>
+      <div className="deck">
+        <Hangar
+          models={primary}
+          visionDirs={visionDirs}
+          roots={roots}
+          scanning={scanning}
+          estimates={estimates}
+          runningPath={runningPath ?? null}
+          busy={busy}
+          selectedPath={selectedPath}
+          onHover={setHoverPath}
+          onSelect={(path) => setSelectedPath(path === selectedPath ? null : path)}
+          onIgnite={(m) => ignite(m)}
+          onBench={runBench}
+          onRescan={rescan}
+          onAddFolder={addFolder}
+          onRemoveFolder={removeFolder}
+        />
 
-      {error && <div className="error">Scan failed: {error}</div>}
+        <div className="stage">
+          <Core
+            gpu={gpu}
+            infer={metrics}
+            server={server}
+            ghost={ghost}
+            modelName={runningModel ? modelLabel(runningModel) : server?.model_path ? baseName(server.model_path) : null}
+          />
+          {server?.error && <div className="fault">{server.error}</div>}
+        </div>
 
-      {!scanning && primary.length === 0 && !error && (
-        <div className="empty">
-          No GGUF models found in the default caches. Point the app at a folder to
-          get started.
+        <Rail
+          telemetry={telemetry}
+          metrics={metrics}
+          selected={selected}
+          estimate={selected ? estimates.get(selected.path) ?? null : null}
+          bench={bench}
+          benching={benching}
+          busy={busy}
+          onIgniteWith={(m, ngl, ctx) => ignite(m, ngl, ctx)}
+          onCloseBench={() => setBench(null)}
+        />
+      </div>
+
+      <Console server={server} />
+
+      {error && (
+        <div className="toast-error">
+          <button onClick={() => setError(null)}>✕</button>
+          {error}
         </div>
       )}
-
-      {primary.length > 0 && (
-        <table className="model-table">
-          <thead>
-            <tr>
-              <th>Model</th>
-              <th>Arch</th>
-              <th>Quant</th>
-              <th>Ctx</th>
-              <th>Params</th>
-              <th>Size</th>
-              <th>Source</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {primary.map((m) => {
-              const md = m.metadata;
-              return (
-                <tr key={m.path} title={m.path}>
-                  <td className="model-name">
-                    {md?.name ?? m.file_name}
-                    {m.shard_total && (
-                      <span className="badge">{m.shard_total} shards</span>
-                    )}
-                    {visionDirs.has(dirOf(m.path)) && (
-                      <span className="badge vision" title="Has a multimodal projector (mmproj) companion file">
-                        vision
-                      </span>
-                    )}
-                    {m.parse_error && (
-                      <span className="badge warn" title={m.parse_error}>
-                        unreadable
-                      </span>
-                    )}
-                  </td>
-                  <td>{md?.architecture ?? "—"}</td>
-                  <td>{md?.quant_label ?? "—"}</td>
-                  <td>{formatCtx(md?.context_length ?? null)}</td>
-                  <td>{md?.size_label ?? "—"}</td>
-                  <td>{formatBytes(m.size_bytes)}</td>
-                  <td>
-                    <span className="src">{sourceLabel(m.source)}</span>
-                  </td>
-                  <td>
-                    {server?.running && server.model_path === m.path ? (
-                      <span className="src">running</span>
-                    ) : (
-                      <div className="row-actions">
-                        <button
-                          className="auto-btn"
-                          disabled={estimating !== null || !!m.parse_error}
-                          onClick={() => autoConfig(m)}
-                          title="Estimate optimal config for your GPU"
-                        >
-                          {estimating === m.path ? "…" : "⚙ Auto"}
-                        </button>
-                        <button
-                          className="bench-btn"
-                          disabled={benching !== null || !!m.parse_error}
-                          onClick={() => benchmark(m)}
-                          title="Measure real tok/s across configs on your GPU"
-                        >
-                          {benching === m.path ? "Benchmarking…" : "Bench"}
-                        </button>
-                        <button
-                          className="launch-btn"
-                          disabled={launching !== null || !!m.parse_error}
-                          onClick={() => launch(m)}
-                        >
-                          {launching === m.path ? "Launching…" : "Launch"}
-                        </button>
-                      </div>
-                    )}
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      )}
-    </main>
+    </div>
   );
 }
-
-export default App;

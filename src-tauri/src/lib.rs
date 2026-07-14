@@ -1,4 +1,5 @@
 mod benchmark;
+mod chat;
 mod estimator;
 mod gguf;
 mod llama;
@@ -48,6 +49,41 @@ fn add_model_dir(dir: String) -> Result<settings::Settings, String> {
 #[tauri::command]
 fn remove_model_dir(dir: String) -> Result<settings::Settings, String> {
     settings::remove_model_dir(&dir)
+}
+
+/// Current persisted settings.
+#[tauri::command]
+fn get_settings() -> settings::Settings {
+    settings::load()
+}
+
+/// Persist the preferred llama-server binary (None = auto-select best).
+#[tauri::command]
+fn set_preferred_binary(path: Option<String>) -> Result<settings::Settings, String> {
+    settings::set_preferred_binary(path)
+}
+
+/// Start a streaming chat generation against the running server.
+#[tauri::command]
+fn chat_send(
+    window: tauri::Window,
+    llama: State<'_, LlamaManager>,
+    chat_state: State<'_, chat::ChatState>,
+    id: u64,
+    messages: Vec<chat::ChatMessage>,
+    params: chat::ChatParams,
+) -> Result<(), String> {
+    let base_url = llama
+        .base_url()
+        .ok_or("no model is running — launch one first")?;
+    chat::start_stream(window, &chat_state, base_url, id, messages, params);
+    Ok(())
+}
+
+/// Cancel the in-flight chat generation, if any.
+#[tauri::command]
+fn chat_cancel(chat_state: State<'_, chat::ChatState>) {
+    chat_state.cancel();
 }
 
 /// One live snapshot of GPU + system telemetry. Polled by the frontend.
@@ -146,11 +182,14 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(TelemetryState::new())
         .manage(LlamaManager::new())
+        .manage(chat::ChatState::default())
         .invoke_handler(tauri::generate_handler![
             scan_models,
             scan_roots,
             add_model_dir,
             remove_model_dir,
+            get_settings,
+            set_preferred_binary,
             gpu_telemetry,
             llama_binaries,
             llama_start,
@@ -158,7 +197,9 @@ pub fn run() {
             llama_status,
             inference_metrics,
             estimate_config,
-            benchmark_model
+            benchmark_model,
+            chat_send,
+            chat_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
