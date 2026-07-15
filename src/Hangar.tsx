@@ -23,6 +23,7 @@ interface HangarProps {
   onSelect: (path: string) => void;
   onIgnite: (m: ModelEntry) => void;
   onBench: (m: ModelEntry) => void;
+  onSuite: () => void;
   onRescan: () => void;
   onAddFolder: () => void;
   onRemoveFolder: (dir: string) => void;
@@ -57,6 +58,13 @@ export function Hangar(p: HangarProps) {
           hangar · {p.models.length} craft{p.scanning ? " · scanning" : ""}
         </span>
         <div className="actions">
+          <button
+            onClick={p.onSuite}
+            disabled={p.busy || p.models.length === 0}
+            title="Benchmark every model at its recommended config and compare"
+          >
+            SUITE
+          </button>
           <button onClick={p.onRescan} disabled={p.scanning}>
             RESCAN
           </button>

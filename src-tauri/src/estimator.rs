@@ -48,6 +48,131 @@ pub struct ContextOption {
     pub fits: bool,
 }
 
+/// One quant level evaluated by the advisor.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantOption {
+    pub label: String,
+    pub est_weights_bytes: u64,
+    /// Headroom left under the VRAM budget after weights + KV + overhead
+    /// (negative values are clamped to 0 with fits=false).
+    pub headroom_bytes: u64,
+    pub fits: bool,
+    pub is_current: bool,
+}
+
+/// "Which GGUF quant should I download for this GPU?" — the sweet spot is the
+/// highest-quality quant that fully fits with KV + headroom to spare.
+#[derive(Debug, Clone, Serialize)]
+pub struct QuantAdvice {
+    /// Estimated parameter count used (from metadata, or derived from file
+    /// size / current quant bpw).
+    pub est_params_b: f64,
+    pub current_label: Option<String>,
+    pub current_fits: bool,
+    /// Best-quality quant that fully fits (None if even the smallest doesn't).
+    pub recommended: Option<String>,
+    pub options: Vec<QuantOption>,
+}
+
+/// Known GGUF quant levels, best quality first, with effective bits-per-weight
+/// (llama.cpp's commonly cited averages, which include the quant's metadata).
+const QUANT_LADDER: &[(&str, f64)] = &[
+    ("F16", 16.0),
+    ("Q8_0", 8.5),
+    ("Q6_K", 6.59),
+    ("Q5_K_M", 5.69),
+    ("Q4_K_M", 4.85),
+    ("IQ4_XS", 4.25),
+    ("Q3_K_M", 3.91),
+    ("IQ3_XS", 3.30),
+    ("Q2_K", 2.63),
+];
+
+fn bpw_for(label: &str) -> Option<f64> {
+    // Match loosely: "Q4_K_M" but also mixed labels like "Q4_K - Medium".
+    let up = label.to_ascii_uppercase();
+    QUANT_LADDER
+        .iter()
+        .find(|(l, _)| up.starts_with(l) || up.replace(' ', "").starts_with(l))
+        .map(|(_, b)| *b)
+        .or(match up.as_str() {
+            "F32" => Some(32.0),
+            "BF16" => Some(16.0),
+            "Q4_K_S" => Some(4.58),
+            "Q5_K_S" => Some(5.54),
+            "Q5_0" => Some(5.54),
+            "Q4_0" => Some(4.55),
+            "Q3_K_S" => Some(3.50),
+            "Q3_K_L" => Some(4.27),
+            _ => None,
+        })
+}
+
+/// Build quant advice for a model: which quant levels of *this same model*
+/// would fit this GPU, and which is the sweet spot. Parameter count comes from
+/// metadata when present, else is derived from file size and the current
+/// quant's bits-per-weight.
+pub fn quant_advice(
+    shape: &ModelShape,
+    current_quant: Option<&str>,
+    metadata_params: Option<u64>,
+    gpu_total: u64,
+) -> Option<QuantAdvice> {
+    let current_bpw = current_quant.and_then(bpw_for);
+    let params: f64 = match metadata_params {
+        Some(p) if p > 0 => p as f64,
+        _ => {
+            // Derive from file size: params = bytes * 8 / bpw.
+            let bpw = current_bpw?;
+            shape.file_size as f64 * 8.0 / bpw
+        }
+    };
+
+    let budget = (gpu_total as f64 * VRAM_HEADROOM) as u64;
+    // Judge each quant at a practical working context (KV at 8K or native max).
+    let ctx = 8192u64.min(shape.native_ctx);
+    let kv = kv_bytes(shape, ctx, shape.n_layers);
+
+    let current_up = current_quant.map(|c| c.to_ascii_uppercase());
+    let mut options = Vec::new();
+    let mut recommended: Option<String> = None;
+    let mut current_fits = false;
+
+    for (label, bpw) in QUANT_LADDER {
+        // ~5% on top of raw weights for embeddings/output layers not captured
+        // by average bpw.
+        let weights = (params * bpw / 8.0 * 1.05) as u64;
+        let total = weights + kv + OVERHEAD_BYTES;
+        let fits = total <= budget;
+        let headroom = budget.saturating_sub(total);
+        let is_current = current_up
+            .as_deref()
+            .map(|c| c.starts_with(label))
+            .unwrap_or(false);
+        if is_current && fits {
+            current_fits = true;
+        }
+        if fits && recommended.is_none() {
+            recommended = Some(label.to_string());
+        }
+        options.push(QuantOption {
+            label: label.to_string(),
+            est_weights_bytes: weights,
+            headroom_bytes: headroom,
+            fits,
+            is_current,
+        });
+    }
+
+    Some(QuantAdvice {
+        est_params_b: params / 1e9,
+        current_label: current_quant.map(str::to_string),
+        current_fits,
+        recommended,
+        options,
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VramEstimate {
     pub fits: bool,
@@ -63,6 +188,9 @@ pub struct VramEstimate {
     pub gpu_free_bytes: u64,
     /// Full-offload feasibility across candidate contexts (for a tradeoff view).
     pub context_options: Vec<ContextOption>,
+    /// Which quant levels of this model would fit this GPU (filled by the
+    /// command layer, which knows the file's quant + parameter count).
+    pub quant_advice: Option<QuantAdvice>,
     pub notes: Vec<String>,
 }
 
@@ -178,6 +306,7 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
             gpu_total_bytes: gpu_total,
             gpu_free_bytes: gpu_free,
             context_options,
+            quant_advice: None,
             notes,
         };
     }
@@ -218,6 +347,7 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         gpu_total_bytes: gpu_total,
         gpu_free_bytes: gpu_free,
         context_options,
+        quant_advice: None,
         notes,
     }
 }
@@ -254,6 +384,67 @@ mod tests {
         let small = estimate(&shape_7b(), 8 * 1_000_000_000, 8 * 1_000_000_000, vec![]);
         let big = estimate(&shape_7b(), 24 * 1_000_000_000, 24 * 1_000_000_000, vec![]);
         assert!(big.ctx_size >= small.ctx_size);
+    }
+
+    #[test]
+    fn quant_advisor_recommends_downsizing_for_fp16() {
+        // A 14B model at F16 on a 16 GB GPU: F16/Q8 can't fit, a mid quant can.
+        let shape = ModelShape {
+            file_size: 28_000_000_000, // ~14B * 16bpw
+            n_layers: 40,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 32768,
+        };
+        let advice = quant_advice(&shape, Some("F16"), Some(14_000_000_000), 16_000_000_000)
+            .expect("advice");
+        assert!(!advice.current_fits, "F16 14B must not fit in 16GB");
+        let rec = advice.recommended.expect("some quant should fit");
+        assert!(
+            ["Q6_K", "Q5_K_M", "Q4_K_M"].contains(&rec.as_str()),
+            "expected a mid quant, got {rec}"
+        );
+        // Ladder must be ordered best-first and the recommended one must fit
+        // with headroom.
+        let rec_opt = advice.options.iter().find(|o| o.label == rec).unwrap();
+        assert!(rec_opt.fits && rec_opt.headroom_bytes > 0);
+    }
+
+    #[test]
+    fn quant_advisor_keeps_small_models_at_high_quality() {
+        // A 4B model on a 16 GB GPU: even Q8_0 fits; F16 likely too.
+        let shape = ModelShape {
+            file_size: 2_800_000_000,
+            n_layers: 36,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 32768,
+        };
+        let advice =
+            quant_advice(&shape, Some("Q4_K_M"), Some(4_000_000_000), 16_000_000_000).unwrap();
+        assert!(advice.current_fits);
+        let rec = advice.recommended.unwrap();
+        assert!(
+            ["F16", "Q8_0"].contains(&rec.as_str()),
+            "small model should recommend high quality, got {rec}"
+        );
+    }
+
+    #[test]
+    fn quant_advisor_derives_params_from_file_size() {
+        // No metadata param count: derive from size/bpw (4.85 bpw Q4_K_M).
+        let shape = ModelShape {
+            file_size: 4_850_000_000,
+            n_layers: 32,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 8192,
+        };
+        let advice = quant_advice(&shape, Some("Q4_K_M"), None, 24_000_000_000).unwrap();
+        assert!((advice.est_params_b - 8.0).abs() < 0.5, "~8B expected, got {}", advice.est_params_b);
     }
 
     #[test]

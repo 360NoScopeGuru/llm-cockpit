@@ -200,6 +200,75 @@ fn parse_timings(body: &str) -> Option<(f64, f64)> {
     Some((prefill, decode))
 }
 
+/// One row of a cross-model benchmark report (frontend supplies the rows it
+/// accumulated from suite runs).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReportRow {
+    pub model: String,
+    pub quant: Option<String>,
+    pub n_gpu_layers: u32,
+    pub ctx_size: u32,
+    pub load_ms: u64,
+    pub prefill_tok_s: f64,
+    pub decode_tok_s: f64,
+    pub peak_vram_bytes: u64,
+}
+
+/// Write a Markdown benchmark report to Documents\llm-cockpit and return its
+/// path. Rows are written in the order given; a ranking column is derived from
+/// decode speed.
+pub fn export_report(gpu_name: &str, rows: &[ReportRow]) -> Result<String, String> {
+    if rows.is_empty() {
+        return Err("no benchmark rows to export".into());
+    }
+    let dir = dirs::document_dir()
+        .ok_or("no Documents dir on this platform")?
+        .join("llm-cockpit");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("bench-report-{now}.md"));
+
+    let best = rows
+        .iter()
+        .map(|r| r.decode_tok_s)
+        .fold(0.0_f64, f64::max);
+
+    let mut md = String::new();
+    md.push_str(&format!(
+        "# llm-cockpit benchmark report\n\nGPU: **{gpu_name}**  \nConfigs: auto-recommended per model (max offload + context that fit).  \nAll numbers measured on this machine — not estimates.\n\n"
+    ));
+    md.push_str(
+        "| Model | Quant | GPU layers | Ctx | Load | Prefill tok/s | Decode tok/s | Peak VRAM | vs best |\n|---|---|---|---|---|---|---|---|---|\n",
+    );
+    for r in rows {
+        let rel = if best > 0.0 {
+            format!("{:.0}%", r.decode_tok_s / best * 100.0)
+        } else {
+            "—".into()
+        };
+        md.push_str(&format!(
+            "| {} | {} | {} | {} | {:.1}s | {:.0} | **{:.1}** | {:.2} GB | {} |\n",
+            r.model,
+            r.quant.as_deref().unwrap_or("?"),
+            r.n_gpu_layers,
+            r.ctx_size,
+            r.load_ms as f64 / 1000.0,
+            r.prefill_tok_s,
+            r.decode_tok_s,
+            r.peak_vram_bytes as f64 / 1e9,
+            rel,
+        ));
+    }
+    md.push('\n');
+
+    std::fs::write(&path, md).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@ import {
   BenchResult,
   InferenceMetrics,
   ModelEntry,
+  SuiteRow,
   TelemetrySnapshot,
   VramEstimate,
   ctxLabel,
@@ -20,9 +21,12 @@ interface RailProps {
   estimate: VramEstimate | null;
   bench: { name: string; expected: number; results: BenchResult[] } | null;
   benching: boolean;
+  suite: { running: boolean; current: string | null; total: number; rows: SuiteRow[]; exportPath: string | null } | null;
   busy: boolean;
   onIgniteWith: (m: ModelEntry, ngl: number, ctx: number) => void;
   onCloseBench: () => void;
+  onCloseSuite: () => void;
+  onExportSuite: () => void;
 }
 
 function Slim({
@@ -115,7 +119,13 @@ export function Rail(p: RailProps) {
         )}
       </div>
 
-      {p.bench ? (
+      {p.suite ? (
+        <SuitePanel
+          suite={p.suite}
+          onClose={p.onCloseSuite}
+          onExport={p.onExportSuite}
+        />
+      ) : p.bench ? (
         <div className="rail-section">
           <h4 className="microlabel">
             bench · {p.bench.name}
@@ -249,6 +259,7 @@ function ConfigPanel({
           </div>
         ))}
       </div>
+      {est.quant_advice && <QuantAdvisor advice={est.quant_advice} />}
       {est.notes.length > 0 && (
         <ul className="rail-notes">
           {est.notes.map((n, i) => (
@@ -263,6 +274,111 @@ function ConfigPanel({
       >
         IGNITE · ngl {est.n_gpu_layers} · ctx {ctxLabel(est.ctx_size)}
       </button>
+    </div>
+  );
+}
+
+function QuantAdvisor({ advice }: { advice: import("./types").QuantAdvice }) {
+  const rec = advice.recommended;
+  const cur = advice.current_label;
+  const curIsRec = !!rec && !!cur && cur.toUpperCase().startsWith(rec);
+  const recOpt = advice.options.find((o) => o.label === rec);
+  return (
+    <div style={{ marginTop: 12 }}>
+      <span className="microlabel">quant advisor · ~{advice.est_params_b.toFixed(0)}B params</span>
+      <div className="advisor-verdict">
+        {curIsRec ? (
+          <span className="fit full">
+            {cur} IS THE SWEET SPOT for this GPU
+          </span>
+        ) : rec ? (
+          <span className="fit partial" title={`This file is ${cur ?? "?"} — a ${rec} of the same model would fully fit`}>
+            {advice.current_fits ? `${cur} fits — ` : `${cur} won't fully fit — `}
+            get {rec} ({recOpt ? `${gb(recOpt.headroom_bytes)} gb headroom` : "fits"})
+          </span>
+        ) : (
+          <span className="fit none">no quant of this model fully fits this GPU</span>
+        )}
+      </div>
+      <div className="ladder">
+        {advice.options.map((o) => (
+          <div key={o.label} className="rung">
+            <b style={o.is_current ? { color: "var(--violet)" } : undefined}>
+              {o.label}
+              {o.is_current ? " ◂ this file" : ""}
+            </b>
+            <span>{gb(o.est_weights_bytes)} gb</span>
+            <span className={o.fits ? "yes" : "no"}>
+              {o.fits ? `✓ +${gb(o.headroom_bytes)}g` : "✗"}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SuitePanel({
+  suite,
+  onClose,
+  onExport,
+}: {
+  suite: { running: boolean; current: string | null; total: number; rows: SuiteRow[]; exportPath: string | null };
+  onClose: () => void;
+  onExport: () => void;
+}) {
+  const done = suite.rows.filter((r) => !r.skipped);
+  const best = done.reduce((m, r) => Math.max(m, r.decode_tok_s), 0);
+  return (
+    <div className="rail-section">
+      <h4 className="microlabel">
+        benchmark suite · {suite.rows.length}/{suite.total}
+        {!suite.running && (
+          <button style={{ float: "right", padding: "0 6px", fontSize: 10 }} onClick={onClose}>
+            ✕
+          </button>
+        )}
+      </h4>
+      {suite.rows.map((r, i) =>
+        r.skipped ? (
+          <div key={i} className="suite-bar skipped" title={r.skipped}>
+            <span className="suite-name">{r.model}</span>
+            <span className="suite-val">skipped · {r.skipped}</span>
+          </div>
+        ) : (
+          <div key={i} className="suite-bar" title={`ngl ${r.n_gpu_layers} · ctx ${ctxLabel(r.ctx_size)} · peak ${gb(r.peak_vram_bytes, 2)} gb · load ${(r.load_ms / 1000).toFixed(1)}s`}>
+            <div className="suite-head">
+              <span className="suite-name">{r.model}</span>
+              <span className="suite-val num">
+                {r.decode_tok_s.toFixed(1)} <small>tok/s</small>
+              </span>
+            </div>
+            <div className="suite-track">
+              <div
+                className={`suite-fill ${best > 0 && r.decode_tok_s === best ? "best" : ""}`}
+                style={{ width: `${best > 0 ? (r.decode_tok_s / best) * 100 : 0}%` }}
+              />
+            </div>
+          </div>
+        )
+      )}
+      {suite.running && (
+        <div className="suite-bar running">
+          measuring {suite.current ?? "…"} — loading + generating…
+        </div>
+      )}
+      {!suite.running && done.length > 0 && (
+        <>
+          <button className="wide-btn" onClick={onExport}>
+            EXPORT MARKDOWN REPORT
+          </button>
+          {suite.exportPath && (
+            <div className="microlabel" style={{ marginTop: 6, wordBreak: "break-all", textTransform: "none", letterSpacing: 0 }}>
+              saved: {suite.exportPath}
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

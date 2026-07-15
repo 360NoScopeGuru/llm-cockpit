@@ -174,14 +174,30 @@ export function Core(props: CoreProps) {
       }
 
       // --- KV cache band ---
+      // Above 90% the context is nearly exhausted (next stop: truncation or a
+      // spill), so the band goes into a pulsing red alert and generation
+      // particles drag to telegraph the latency cliff.
+      const kvHot = d.kv >= 0.9;
       if (p.server?.running && health === "ok") {
         arc(R - 44, 0, 1, 4, "rgba(255,180,84,0.08)");
-        if (d.kv > 0.004) arc(R - 44, 0, d.kv, 4, "#ffb454", 8);
+        if (d.kv > 0.004) {
+          if (kvHot) {
+            const pulse = 0.55 + 0.4 * Math.sin(now / 150);
+            // Glitch echo: a faint offset twin ring while in overflow alert.
+            arc(R - 46.5, 0, d.kv, 2, `rgba(255,77,109,${pulse * 0.35})`, 0);
+            arc(R - 44, 0, d.kv, 4, `rgba(255,77,109,${pulse})`, 16);
+          } else {
+            arc(R - 44, 0, d.kv, 4, "#ffb454", 8);
+          }
+        }
       }
 
       // --- Particles while generating ---
+      // In KV-overflow alert they crawl (and tint red): the visual analog of
+      // the latency hit when the cache is saturated.
+      const drag = kvHot ? 0.3 : 1;
       if (busy) {
-        spawnCarry += dt * Math.min(60, 6 + d.decode / 4);
+        spawnCarry += dt * drag * Math.min(60, 6 + d.decode / 4);
         while (spawnCarry >= 1 && particles.length < 110) {
           spawnCarry -= 1;
           particles.push({
@@ -195,12 +211,14 @@ export function Core(props: CoreProps) {
       }
       particles = particles.filter((pt) => pt.life > 0);
       for (const pt of particles) {
-        pt.r += pt.vr * dt;
-        pt.a += pt.va * dt;
+        pt.r += pt.vr * dt * drag;
+        pt.a += pt.va * dt * drag;
         pt.life -= dt * 0.75;
         ctx.beginPath();
         ctx.arc(cx + Math.cos(pt.a) * pt.r, cy + Math.sin(pt.a) * pt.r, 1.6, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(54,241,182,${Math.max(0, pt.life) * 0.8})`;
+        ctx.fillStyle = kvHot
+          ? `rgba(255,77,109,${Math.max(0, pt.life) * 0.8})`
+          : `rgba(54,241,182,${Math.max(0, pt.life) * 0.8})`;
         ctx.fill();
       }
 
@@ -227,6 +245,10 @@ export function Core(props: CoreProps) {
         ctx.font = mono(11);
         ctx.fillStyle = "#5d7470";
         ctx.fillText(`prefill ${(p.infer?.prompt_tokens_per_sec ?? 0).toFixed(0)} tok/s`, cx, cy + 46);
+        if (kvHot) {
+          ctx.fillStyle = `rgba(255,77,109,${0.6 + 0.4 * Math.sin(now / 150)})`;
+          ctx.fillText("⚠ kv cache saturated — context nearly full", cx, cy + 66);
+        }
       } else if (health === "ok") {
         ctx.font = mono(26);
         ctx.fillStyle = "#36f1b6";

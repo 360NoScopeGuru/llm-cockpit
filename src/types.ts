@@ -84,6 +84,22 @@ export interface ContextOption {
   fits: boolean;
 }
 
+export interface QuantOption {
+  label: string;
+  est_weights_bytes: number;
+  headroom_bytes: number;
+  fits: boolean;
+  is_current: boolean;
+}
+
+export interface QuantAdvice {
+  est_params_b: number;
+  current_label: string | null;
+  current_fits: boolean;
+  recommended: string | null;
+  options: QuantOption[];
+}
+
 export interface VramEstimate {
   fits: boolean;
   full_offload: boolean;
@@ -97,7 +113,20 @@ export interface VramEstimate {
   gpu_total_bytes: number;
   gpu_free_bytes: number;
   context_options: ContextOption[];
+  quant_advice: QuantAdvice | null;
   notes: string[];
+}
+
+export interface SuiteRow {
+  model: string;
+  quant: string | null;
+  n_gpu_layers: number;
+  ctx_size: number;
+  load_ms: number;
+  prefill_tok_s: number;
+  decode_tok_s: number;
+  peak_vram_bytes: number;
+  skipped: string | null;
 }
 
 export interface BenchResult {

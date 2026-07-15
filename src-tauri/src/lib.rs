@@ -155,7 +155,29 @@ fn estimate_config(
     let mut notes = Vec::new();
     let shape = estimator::shape_from_metadata(&md, file_size, &mut notes)
         .ok_or_else(|| "insufficient model metadata to estimate".to_string())?;
-    Ok(estimator::estimate(&shape, gpu_total, gpu_free, notes))
+    let mut est = estimator::estimate(&shape, gpu_total, gpu_free, notes);
+    est.quant_advice = estimator::quant_advice(
+        &shape,
+        md.quant_label.as_deref(),
+        md.parameter_count,
+        gpu_total,
+    );
+    Ok(est)
+}
+
+/// Export accumulated suite results as a Markdown report in Documents.
+#[tauri::command]
+fn export_bench_report(
+    telemetry: State<'_, TelemetryState>,
+    rows: Vec<benchmark::ReportRow>,
+) -> Result<String, String> {
+    let gpu_name = telemetry
+        .snapshot()
+        .gpus
+        .first()
+        .map(|g| g.name.clone())
+        .unwrap_or_else(|| "unknown GPU".into());
+    benchmark::export_report(&gpu_name, &rows)
 }
 
 /// Measured benchmark: launch each config for real and measure tok/s + peak
@@ -198,6 +220,7 @@ pub fn run() {
             inference_metrics,
             estimate_config,
             benchmark_model,
+            export_bench_report,
             chat_send,
             chat_cancel
         ])

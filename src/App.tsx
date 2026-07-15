@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Core, CoreGhost } from "./Core";
 import { Hangar } from "./Hangar";
 import { Rail } from "./Rail";
@@ -14,6 +16,7 @@ import {
   ScanRoot,
   ServerStatus,
   Settings,
+  SuiteRow,
   TelemetrySnapshot,
   VramEstimate,
   baseName,
@@ -43,6 +46,13 @@ export default function App() {
     results: BenchResult[];
   } | null>(null);
   const [benching, setBenching] = useState(false);
+  const [suite, setSuite] = useState<{
+    running: boolean;
+    current: string | null;
+    total: number;
+    rows: SuiteRow[];
+    exportPath: string | null;
+  } | null>(null);
   const [binaries, setBinaries] = useState<LlamaBinary[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
 
@@ -81,6 +91,39 @@ export default function App() {
     rescan();
     invoke<LlamaBinary[]>("llama_binaries").then(setBinaries).catch(() => {});
     invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+  }, []);
+
+  // WebView2 on Windows can lay the page out at physical-pixel width while
+  // still rendering at the display's DPI scale, painting wider/taller than the
+  // window and clipping the right/bottom of the UI. Self-correct by zooming so
+  // rendered size == real client size (no-op on healthy setups; re-checked on
+  // every resize).
+  const zoomRef = useRef(1);
+  useEffect(() => {
+    let disposed = false;
+    const correct = async () => {
+      try {
+        const size = await getCurrentWindow().innerSize();
+        const ratio = size.width / (window.innerWidth * window.devicePixelRatio);
+        if (!disposed && isFinite(ratio) && ratio > 0.3 && Math.abs(1 - ratio) > 0.02) {
+          zoomRef.current *= ratio;
+          await getCurrentWebview().setZoom(zoomRef.current);
+        }
+      } catch {
+        /* not fatal — worst case the window needs a resize */
+      }
+    };
+    correct();
+    const t = setTimeout(correct, 800);
+    let unlisten: (() => void) | undefined;
+    getCurrentWindow()
+      .onResized(() => correct())
+      .then((u) => (unlisten = u));
+    return () => {
+      disposed = true;
+      clearTimeout(t);
+      unlisten?.();
+    };
   }, []);
 
   // ---- polling ----
@@ -191,6 +234,94 @@ export default function App() {
     }
   }
 
+  // ---- benchmark suite (all models, recommended config each) ----
+
+  async function runSuite() {
+    const eligible = primary.filter((m) => !m.parse_error);
+    if (eligible.length === 0) return;
+    setBenching(true);
+    setBench(null);
+    setSuite({ running: true, current: null, total: eligible.length, rows: [], exportPath: null });
+    try {
+      for (const m of eligible) {
+        const name = modelLabel(m);
+        setSuite((prev) => (prev ? { ...prev, current: name } : prev));
+        let est = estimates.get(m.path);
+        if (!est) {
+          try {
+            est = await invoke<VramEstimate>("estimate_config", { modelPath: m.path });
+            setEstimates((prev) => new Map(prev).set(m.path, est!));
+          } catch {
+            /* fall through to skip */
+          }
+        }
+        const push = (row: SuiteRow) =>
+          setSuite((prev) => (prev ? { ...prev, rows: [...prev.rows, row] } : prev));
+        if (!est || !est.fits) {
+          push({
+            model: name,
+            quant: m.metadata?.quant_label ?? null,
+            n_gpu_layers: 0,
+            ctx_size: 0,
+            load_ms: 0,
+            prefill_tok_s: 0,
+            decode_tok_s: 0,
+            peak_vram_bytes: 0,
+            skipped: est ? "won't fit on GPU" : "no estimate",
+          });
+          continue;
+        }
+        try {
+          const res = await invoke<BenchResult[]>("benchmark_model", {
+            modelPath: m.path,
+            configs: [{ n_gpu_layers: est.n_gpu_layers, ctx_size: est.ctx_size }],
+          });
+          const r = res[0];
+          push({
+            model: name,
+            quant: m.metadata?.quant_label ?? null,
+            n_gpu_layers: r?.n_gpu_layers ?? est.n_gpu_layers,
+            ctx_size: r?.ctx_size ?? est.ctx_size,
+            load_ms: r?.load_ms ?? 0,
+            prefill_tok_s: r?.prefill_tok_s ?? 0,
+            decode_tok_s: r?.decode_tok_s ?? 0,
+            peak_vram_bytes: r?.peak_vram_bytes ?? 0,
+            skipped: r?.loaded ? null : r?.error ?? "failed",
+          });
+        } catch (e) {
+          push({
+            model: name,
+            quant: m.metadata?.quant_label ?? null,
+            n_gpu_layers: 0,
+            ctx_size: 0,
+            load_ms: 0,
+            prefill_tok_s: 0,
+            decode_tok_s: 0,
+            peak_vram_bytes: 0,
+            skipped: String(e),
+          });
+        }
+      }
+    } finally {
+      setSuite((prev) => (prev ? { ...prev, running: false, current: null } : prev));
+      setBenching(false);
+      setServer(await invoke<ServerStatus>("llama_status"));
+    }
+  }
+
+  async function exportSuite() {
+    if (!suite) return;
+    try {
+      const rows = suite.rows
+        .filter((r) => !r.skipped)
+        .map(({ skipped, ...rest }) => rest);
+      const path = await invoke<string>("export_bench_report", { rows });
+      setSuite((prev) => (prev ? { ...prev, exportPath: path } : prev));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   // ---- folders / binary ----
 
   async function addFolder() {
@@ -295,6 +426,7 @@ export default function App() {
           onSelect={(path) => setSelectedPath(path === selectedPath ? null : path)}
           onIgnite={(m) => ignite(m)}
           onBench={runBench}
+          onSuite={runSuite}
           onRescan={rescan}
           onAddFolder={addFolder}
           onRemoveFolder={removeFolder}
@@ -318,9 +450,12 @@ export default function App() {
           estimate={selected ? estimates.get(selected.path) ?? null : null}
           bench={bench}
           benching={benching}
+          suite={suite}
           busy={busy}
           onIgniteWith={(m, ngl, ctx) => ignite(m, ngl, ctx)}
           onCloseBench={() => setBench(null)}
+          onCloseSuite={() => setSuite(null)}
+          onExportSuite={exportSuite}
         />
       </div>
 

@@ -116,8 +116,9 @@ select:focus {
 
 .shell {
   display: grid;
-  grid-template-rows: 52px 1fr auto;
+  grid-template-rows: 52px minmax(0, 1fr) auto;
   height: 100vh;
+  overflow: hidden;
 }
 
 /* ---- header ---- */
@@ -667,6 +668,76 @@ select:focus {
 .wide-btn {
   width: 100%;
   margin-top: 10px;
+}
+
+/* ---- quant advisor ---- */
+
+.advisor-verdict {
+  margin: 6px 0 4px;
+}
+
+/* ---- benchmark suite ---- */
+
+.suite-bar {
+  margin-bottom: 9px;
+}
+
+.suite-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 3px;
+}
+
+.suite-name {
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 170px;
+}
+
+.suite-val {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--teal);
+}
+.suite-val small {
+  color: var(--muted);
+  font-size: 9px;
+}
+
+.suite-track {
+  height: 6px;
+  background: rgba(150, 226, 210, 0.07);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.suite-fill {
+  height: 100%;
+  background: rgba(54, 241, 182, 0.55);
+  border-radius: 3px;
+  transition: width 0.5s ease;
+}
+.suite-fill.best {
+  background: var(--teal);
+  box-shadow: 0 0 8px rgba(54, 241, 182, 0.5);
+}
+
+.suite-bar.skipped {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.suite-bar.running {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--amber);
+  animation: blink 1.4s ease-in-out infinite;
 }
 
 /* ---- bench table ---- */

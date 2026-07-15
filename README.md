@@ -62,13 +62,18 @@ Rust backend (`src-tauri/src/`):
   RTX 5080 and reading back live tok/s (load → generate → metrics → stop).
 - `estimator.rs` — hardware-aware auto-config (tier 1). From a model's GGUF shape
   + the GPU's VRAM, computes the max GPU-offload layers + context that fit
-  (weights + KV-cache + overhead vs a headroom budget). Command: `estimate_config`.
-  Verified against real models on the RTX 5080.
+  (weights + KV-cache + overhead vs a headroom budget), plus a **quant advisor**:
+  evaluates the full GGUF quant ladder (F16 → Q2_K, bits-per-weight based) for
+  the same model and names the sweet spot — e.g. "F16 won't fit; get Q4_K_M,
+  leaves N GB headroom". Command: `estimate_config`. Verified against real
+  models on the RTX 5080.
 - `benchmark.rs` — measured benchmark (the moat). Launches each candidate config
   for real on a dedicated port, generates a fixed token count (`ignore_eos`), and
   records real prefill/decode tok/s (token-count / time) + peak VRAM (NVML sampled
-  during the run). Emits per-config progress. Command: `benchmark_model`. Verified
-  on the RTX 5080 (full offload 193 tok/s vs partial 24 tok/s decode — an 8× cliff).
+  during the run). Emits per-config progress. Commands: `benchmark_model` and
+  `export_bench_report` (writes a Markdown comparison report to
+  `Documents\llm-cockpit`). Verified on the RTX 5080 (full offload 193 tok/s vs
+  partial 24 tok/s decode — an 8× cliff).
 
 Frontend (`src/`) — **"The Core"**, a control-room instrument panel:
 - `Core.tsx` — the centerpiece: a live canvas reactor rendering VRAM as a
@@ -77,13 +82,18 @@ Frontend (`src/`) — **"The Core"**, a control-room instrument panel:
   Hovering a model in the hangar projects its estimated footprint onto the live
   ring as a violet ghost arc — you see whether it fits before launching.
   Launching is an "ignition" sequence; the center readout shows live decode
-  tok/s while generating.
+  tok/s while generating. When KV-cache utilization crosses 90% the band goes
+  into a pulsing red overflow alert with a glitch echo, and the token particles
+  drag + tint red to telegraph the latency cliff.
 - `Hangar.tsx` — left bay: your models as craft cards with live fit verdicts
   (FITS / partial / CPU-only), vision + shard tags, IGNITE and BENCH actions,
   and the scan-source chips (add/remove folders via the native picker).
 - `Rail.tsx` — right bay: system vitals (RAM/CPU/temp/power/clocks), plus a
-  contextual panel — live bench results, or the selected model's config detail
-  (recommendation, VRAM budget breakdown, full context ladder).
+  contextual panel — the benchmark-suite comparison (per-model decode bars +
+  Markdown export), live single-model bench results, or the selected model's
+  config detail (recommendation, VRAM budget breakdown, full context ladder,
+  and the quant-advisor ladder). The hangar's SUITE button benchmarks every
+  model at its recommended config back-to-back.
 - `Console.tsx` — bottom drawer: terminal-style streaming chat with sampler
   controls (temp/top-k/top-p/min-p/max/system prompt), per-reply token counts
   and measured tok/s, STOP mid-generation, and a copyable OpenAI-compatible API
