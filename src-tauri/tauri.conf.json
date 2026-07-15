@@ -13,8 +13,11 @@
     "windows": [
       {
         "title": "llm-cockpit",
-        "width": 800,
-        "height": 600
+        "width": 1440,
+        "height": 920,
+        "minWidth": 1080,
+        "minHeight": 720,
+        "center": true
       }
     ],
     "security": {

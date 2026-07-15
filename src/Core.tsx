@@ -271,11 +271,12 @@ export function Core(props: CoreProps) {
         ctx.fillStyle = "#d7e5e0";
         ctx.fillText(`${Math.round(d.temp)}°`, cx, cy + 4);
         micro("core idle", cy + 26);
-        micro(gpu?.name ?? "no gpu detected", cy + 44);
+        if (R > 150) micro(gpu?.name ?? "no gpu detected", cy + 44);
       }
 
-      // VRAM caption above center.
-      if (gpu) {
+      // VRAM caption above center (suppressed when the ring is too small for
+      // the long captions to fit inside it).
+      if (gpu && R > 150) {
         ctx.font = mono(11);
         ctx.fillStyle = "#5d7470";
         ctx.fillText(

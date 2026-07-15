@@ -103,25 +103,40 @@ export default function App() {
     let disposed = false;
     const correct = async () => {
       try {
-        const size = await getCurrentWindow().innerSize();
-        const ratio = size.width / (window.innerWidth * window.devicePixelRatio);
+        // Ground truth from Win32 GetClientRect — tao/WebView2 can agree on a
+        // DPI belief that the real window contradicts.
+        const truth = await invoke<[number, number] | null>("true_client_size");
+        if (!truth) return;
+        const ratio = truth[0] / (window.innerWidth * window.devicePixelRatio);
         if (!disposed && isFinite(ratio) && ratio > 0.3 && Math.abs(1 - ratio) > 0.02) {
           zoomRef.current *= ratio;
           await getCurrentWebview().setZoom(zoomRef.current);
         }
       } catch {
-        /* not fatal — worst case the window needs a resize */
+        /* not fatal */
       }
     };
+    // The webview's DPI belief can settle (or flip) some time after load with
+    // no resize event, so re-check on a short cadence at first, then hourly-ish
+    // cheap: every 5s (a no-op comparison when healthy).
     correct();
-    const t = setTimeout(correct, 800);
+    let ticks = 0;
+    const iv = setInterval(() => {
+      ticks += 1;
+      correct();
+      if (ticks > 6) {
+        clearInterval(iv);
+      }
+    }, 1200);
+    const slowIv = setInterval(correct, 5000);
     let unlisten: (() => void) | undefined;
     getCurrentWindow()
       .onResized(() => correct())
       .then((u) => (unlisten = u));
     return () => {
       disposed = true;
-      clearTimeout(t);
+      clearInterval(iv);
+      clearInterval(slowIv);
       unlisten?.();
     };
   }, []);

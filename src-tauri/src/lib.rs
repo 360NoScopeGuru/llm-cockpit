@@ -92,6 +92,46 @@ fn gpu_telemetry(state: State<'_, TelemetryState>) -> TelemetrySnapshot {
     state.snapshot()
 }
 
+/// The window's REAL client size in physical pixels, straight from Win32.
+/// tao/WebView2 can disagree with the OS about DPI (reporting the intended
+/// logical size as physical), which makes every in-page metric self-consistent
+/// while the actual window clips the overflow — so the DPI corrector must
+/// measure against this ground truth instead.
+#[cfg(windows)]
+#[tauri::command]
+fn true_client_size(window: tauri::Window) -> Option<(i32, i32)> {
+    #[repr(C)]
+    struct Rect {
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+    }
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetClientRect(hwnd: *mut core::ffi::c_void, rect: *mut Rect) -> i32;
+    }
+    let hwnd = window.hwnd().ok()?;
+    let mut r = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    unsafe {
+        if GetClientRect(hwnd.0, &mut r) == 0 {
+            return None;
+        }
+    }
+    Some((r.right - r.left, r.bottom - r.top))
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+fn true_client_size(_window: tauri::Window) -> Option<(i32, i32)> {
+    None
+}
+
 /// List available llama-server binaries, best-ranked first.
 #[tauri::command]
 fn llama_binaries() -> Vec<LlamaBinary> {
@@ -213,6 +253,7 @@ pub fn run() {
             get_settings,
             set_preferred_binary,
             gpu_telemetry,
+            true_client_size,
             llama_binaries,
             llama_start,
             llama_stop,
