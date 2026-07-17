@@ -4,10 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { Core, CoreGhost } from "./Core";
-import { Hangar } from "./Hangar";
-import { Rail } from "./Rail";
-import { Console } from "./Console";
+import { Library } from "./Library";
+import { Rail, Ghost } from "./Rail";
+import { Dock } from "./Dock";
+import { Console, StagedIgnite } from "./Console";
+import { FluxSample } from "./Flux";
 import {
   BenchResult,
   InferenceMetrics,
@@ -20,12 +21,14 @@ import {
   TelemetrySnapshot,
   VramEstimate,
   baseName,
-  dirOf,
+  ctxLabel,
+  gb,
   modelLabel,
 } from "./types";
 import "./styles.css";
 
 const PORT = 8137;
+const FLUX_WINDOW = 60;
 
 export default function App() {
   const [models, setModels] = useState<ModelEntry[]>([]);
@@ -39,6 +42,8 @@ export default function App() {
   const [hoverPath, setHoverPath] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
+  const [liveCfg, setLiveCfg] = useState<{ ngl: number; ctx: number } | null>(null);
+  const [history, setHistory] = useState<FluxSample[]>([]);
   const [bench, setBench] = useState<{
     path: string;
     name: string;
@@ -75,9 +80,7 @@ export default function App() {
         if (m.is_shard_continuation || m.is_mmproj || m.parse_error) continue;
         if (estimatesRef.current.has(m.path)) continue;
         invoke<VramEstimate>("estimate_config", { modelPath: m.path })
-          .then((est) =>
-            setEstimates((prev) => new Map(prev).set(m.path, est))
-          )
+          .then((est) => setEstimates((prev) => new Map(prev).set(m.path, est)))
           .catch(() => {});
       }
     } catch (e) {
@@ -117,8 +120,8 @@ export default function App() {
       }
     };
     // The webview's DPI belief can settle (or flip) some time after load with
-    // no resize event, so re-check on a short cadence at first, then hourly-ish
-    // cheap: every 5s (a no-op comparison when healthy).
+    // no resize event, so re-check on a short cadence at first, then keep a
+    // cheap 5s no-op comparison running.
     correct();
     let ticks = 0;
     const iv = setInterval(() => {
@@ -141,7 +144,7 @@ export default function App() {
     };
   }, []);
 
-  // ---- polling ----
+  // ---- polling (telemetry + inference at 1 Hz feeds the flux trace) ----
 
   useEffect(() => {
     let alive = true;
@@ -154,6 +157,16 @@ export default function App() {
         if (alive) {
           setTelemetry(t);
           setMetrics(m);
+          const g = t.gpus[0];
+          setHistory((prev) => [
+            ...prev.slice(-(FLUX_WINDOW - 1)),
+            {
+              decode: m?.predicted_tokens_per_sec ?? 0,
+              util: g?.gpu_util_pct ?? 0,
+              temp: g?.temperature_c ?? 0,
+              kv: m?.kv_cache_usage_ratio ?? 0,
+            },
+          ]);
         }
       } catch {
         /* transient */
@@ -185,14 +198,14 @@ export default function App() {
         est = await invoke<VramEstimate>("estimate_config", { modelPath: m.path });
         setEstimates((prev) => new Map(prev).set(m.path, est!));
       }
-      const status = await invoke<ServerStatus>("llama_start", {
-        config: {
-          model_path: m.path,
-          n_gpu_layers: ngl ?? est?.n_gpu_layers ?? 999,
-          ctx_size: ctx ?? est?.ctx_size ?? 4096,
-          port: PORT,
-        },
-      });
+      const cfg = {
+        model_path: m.path,
+        n_gpu_layers: ngl ?? est?.n_gpu_layers ?? 999,
+        ctx_size: ctx ?? est?.ctx_size ?? 4096,
+        port: PORT,
+      };
+      const status = await invoke<ServerStatus>("llama_start", { config: cfg });
+      setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size });
       setServer(status);
     } catch (e) {
       setError(String(e));
@@ -207,6 +220,7 @@ export default function App() {
     } catch {
       /* ignore */
     }
+    setLiveCfg(null);
     setServer(await invoke<ServerStatus>("llama_status"));
   }
 
@@ -248,6 +262,7 @@ export default function App() {
       setBench(null);
     } finally {
       setBenching(false);
+      setLiveCfg(null);
       setServer(await invoke<ServerStatus>("llama_status"));
     }
   }
@@ -323,6 +338,7 @@ export default function App() {
     } finally {
       setSuite((prev) => (prev ? { ...prev, running: false, current: null } : prev));
       setBenching(false);
+      setLiveCfg(null);
       setServer(await invoke<ServerStatus>("llama_status"));
     }
   }
@@ -380,38 +396,187 @@ export default function App() {
   const busy = launching || benching;
   const runningPath = server?.running ? server.model_path : null;
   const selected = primary.find((m) => m.path === selectedPath) ?? null;
-  const hoverEst = hoverPath && hoverPath !== runningPath ? estimates.get(hoverPath) : null;
-  const ghost: CoreGhost | null = hoverEst
-    ? {
-        bytes: hoverEst.est_weights_bytes + hoverEst.est_kv_bytes + hoverEst.est_overhead_bytes,
-        fits: hoverEst.fits,
-      }
-    : null;
+  const selectedEst = selected ? estimates.get(selected.path) ?? null : null;
+  const runningModel = primary.find((m) => m.path === runningPath) ?? null;
+  const liveEst = runningPath ? estimates.get(runningPath) ?? null : null;
   const gpu = telemetry?.gpus[0] ?? null;
   const health = server?.running ? server.health : "stopped";
-  const runningModel = primary.find((m) => m.path === runningPath);
+  const ready = !!server?.running && health === "ok";
+  const igniting = !!server?.running && (health === "starting" || health === "loading");
+  const generating = ready && (metrics?.requests_processing ?? 0) > 0;
+  const kvAlert = ready && (metrics?.kv_cache_usage_ratio ?? 0) >= 0.9;
+
+  const hoverModel =
+    hoverPath && hoverPath !== runningPath ? primary.find((m) => m.path === hoverPath) : null;
+  const hoverEst = hoverModel ? estimates.get(hoverModel.path) : null;
+  const ghost: Ghost | null =
+    hoverModel && hoverEst
+      ? {
+          name: modelLabel(hoverModel),
+          bytes:
+            hoverEst.est_weights_bytes + hoverEst.est_kv_bytes + hoverEst.est_overhead_bytes,
+          fits: hoverEst.fits,
+          layers: hoverModel.metadata?.block_count
+            ? `${hoverEst.n_gpu_layers}/${hoverModel.metadata.block_count}`
+            : null,
+        }
+      : null;
+
+  const liveName = runningModel
+    ? modelLabel(runningModel)
+    : server?.model_path
+      ? baseName(server.model_path)
+      : null;
+
+  const staged: StagedIgnite | null =
+    !server?.running && !benching && selected && selectedEst && selectedEst.fits
+      ? {
+          name: modelLabel(selected),
+          ngl: selectedEst.n_gpu_layers,
+          layers: selected.metadata?.block_count ?? null,
+          ctx: selectedEst.ctx_size,
+          busy,
+          onIgnite: () => ignite(selected, selectedEst.n_gpu_layers, selectedEst.ctx_size),
+        }
+      : null;
+
+  // Header state line.
+  let stateText: string;
+  let stateCls = "";
+  let lampCls = "";
+  if (kvAlert) {
+    stateText = `GENERATING · CONTAINMENT ${Math.round((metrics?.kv_cache_usage_ratio ?? 0) * 100)}%`;
+    stateCls = "alert";
+    lampCls = "alert";
+  } else if (server?.running && health === "error") {
+    stateText = "FAULT";
+    stateCls = "fault";
+    lampCls = "alert";
+  } else if (igniting || launching) {
+    stateText = liveName ? `IGNITING · ${liveName}` : "IGNITING";
+    stateCls = "live";
+    lampCls = "igniting";
+  } else if (generating) {
+    stateText = `GENERATING · ${liveName ?? ""}`;
+    stateCls = "live";
+    lampCls = "live";
+  } else if (ready) {
+    stateText = `REACTOR LIVE · ${liveName ?? ""}`;
+    stateCls = "live";
+    lampCls = "live";
+  } else if (benching) {
+    stateText = suite ? "COLD · SUITE RUNNING" : "COLD · BENCH RUNNING";
+    lampCls = "igniting";
+  } else if (selected) {
+    stateText = "COLD · FUEL SELECTED";
+  } else {
+    stateText = "COLD · NO REACTOR LIT";
+  }
+
+  const board = suite ? (
+    <SuiteBoard
+      suite={suite}
+      onClose={() => setSuite(null)}
+      onExport={exportSuite}
+    />
+  ) : null;
 
   return (
     <div className="shell">
       <header className="hdr">
-        <span className="wordmark">
-          <span className="hex">⬢</span> TOKA<span className="dim">·</span>MAK
-          <span className="tagline">local llm reactor</span>
+        <span className="wordmark">TOKAMAK</span>
+        <span className={`hdr-state ${stateCls}`}>
+          <span className={`lamp ${lampCls}`} />
+          {stateText}
         </span>
-        <span className="hdr-spacer" />
-        <span className="status-chip">
-          <span className={`dot ${health === "ok" ? "ok" : health === "loading" || health === "starting" ? "loading" : health === "error" ? "error" : ""}`} />
-          {server?.running ? (
-            <>
-              <span className="model-name">{baseName(server.model_path ?? "")}</span>
-              <span className="sub">{server.binary_label}</span>
-            </>
-          ) : benching ? (
-            <span className="sub">benchmark in progress…</span>
-          ) : (
-            <span className="sub">core idle</span>
-          )}
-        </span>
+        <span className="spacer" />
+        {gpu && (
+          <span className="gpu-chip">
+            {gpu.name} · {gb(gpu.vram_total_bytes, 0)} GB
+          </span>
+        )}
+        {server?.running && (
+          <button className="danger" onClick={stop}>
+            Shutdown
+          </button>
+        )}
+      </header>
+
+      <div className="deck">
+        <Library
+          models={primary}
+          visionDirs={visionDirs}
+          roots={roots}
+          scanning={scanning}
+          estimates={estimates}
+          runningPath={runningPath ?? null}
+          busy={busy}
+          selectedPath={selectedPath}
+          hoverPath={hoverPath}
+          onHover={setHoverPath}
+          onSelect={(path) => setSelectedPath(path === selectedPath ? null : path)}
+          onIgnite={(m) => ignite(m)}
+          onBench={runBench}
+          onSuite={runSuite}
+          onRescan={rescan}
+          onAddFolder={addFolder}
+          onRemoveFolder={removeFolder}
+        />
+
+        <div className="center">
+          <Console
+            server={server}
+            metrics={metrics}
+            ctxSize={liveCfg?.ctx ?? null}
+            modelName={liveName}
+            cfgText={
+              liveCfg
+                ? `${liveCfg.ngl}${
+                    runningModel?.metadata?.block_count
+                      ? `/${runningModel.metadata.block_count}`
+                      : ""
+                  } layers · ${ctxLabel(liveCfg.ctx)} ctx`
+                : null
+            }
+            staged={staged}
+            board={board}
+            kvAlert={kvAlert}
+          />
+          <Dock
+            selected={selected}
+            selectedEst={selectedEst}
+            liveModel={runningModel}
+            liveEst={liveEst}
+            liveCfg={liveCfg}
+            metrics={metrics}
+            uptimeMs={server?.uptime_ms ?? null}
+            benchDetail={
+              bench
+                ? {
+                    name: bench.name,
+                    expected: bench.expected,
+                    results: bench.results,
+                    running: benching && !suite,
+                  }
+                : null
+            }
+            onCloseBench={() => setBench(null)}
+          />
+        </div>
+
+        <Rail
+          telemetry={telemetry}
+          metrics={metrics}
+          server={server}
+          liveEst={liveEst}
+          ghost={ghost}
+          ctxSize={liveCfg?.ctx ?? null}
+          history={history}
+          kvAlert={kvAlert}
+        />
+      </div>
+
+      <footer className="statusbar">
         <select
           value={settings?.preferred_binary ?? ""}
           onChange={(e) => pickBinary(e.target.value)}
@@ -424,61 +589,14 @@ export default function App() {
             </option>
           ))}
         </select>
-        {server?.running && (
-          <button className="stop-btn" onClick={stop}>
-            SHUTDOWN
-          </button>
+        <span>poll 1 Hz</span>
+        {server?.base_url && <span className="api">api {server.base_url} · /v1</span>}
+        <span className="spacer" />
+        <span>{roots.length} scan dirs</span>
+        {server?.uptime_ms != null && server.running && (
+          <span>session {fmtUptime(server.uptime_ms)}</span>
         )}
-      </header>
-
-      <div className="deck">
-        <Hangar
-          models={primary}
-          visionDirs={visionDirs}
-          roots={roots}
-          scanning={scanning}
-          estimates={estimates}
-          runningPath={runningPath ?? null}
-          busy={busy}
-          selectedPath={selectedPath}
-          onHover={setHoverPath}
-          onSelect={(path) => setSelectedPath(path === selectedPath ? null : path)}
-          onIgnite={(m) => ignite(m)}
-          onBench={runBench}
-          onSuite={runSuite}
-          onRescan={rescan}
-          onAddFolder={addFolder}
-          onRemoveFolder={removeFolder}
-        />
-
-        <div className="stage">
-          <Core
-            gpu={gpu}
-            infer={metrics}
-            server={server}
-            ghost={ghost}
-            modelName={runningModel ? modelLabel(runningModel) : server?.model_path ? baseName(server.model_path) : null}
-          />
-          {server?.error && <div className="fault">{server.error}</div>}
-        </div>
-
-        <Rail
-          telemetry={telemetry}
-          metrics={metrics}
-          selected={selected}
-          estimate={selected ? estimates.get(selected.path) ?? null : null}
-          bench={bench}
-          benching={benching}
-          suite={suite}
-          busy={busy}
-          onIgniteWith={(m, ngl, ctx) => ignite(m, ngl, ctx)}
-          onCloseBench={() => setBench(null)}
-          onCloseSuite={() => setSuite(null)}
-          onExportSuite={exportSuite}
-        />
-      </div>
-
-      <Console server={server} />
+      </footer>
 
       {error && (
         <div className="toast-error">
@@ -488,4 +606,106 @@ export default function App() {
       )}
     </div>
   );
+}
+
+function SuiteBoard({
+  suite,
+  onClose,
+  onExport,
+}: {
+  suite: {
+    running: boolean;
+    current: string | null;
+    total: number;
+    rows: SuiteRow[];
+    exportPath: string | null;
+  };
+  onClose: () => void;
+  onExport: () => void;
+}) {
+  const done = suite.rows.filter((r) => !r.skipped);
+  const skipped = suite.rows.filter((r) => r.skipped);
+  const ranked = [...done].sort((a, b) => b.decode_tok_s - a.decode_tok_s);
+  const best = ranked[0]?.decode_tok_s ?? 0;
+  return (
+    <div className="board">
+      <div className="board-head">
+        <span className="lbl">Bench Board</span>
+        <span style={{ font: "10.5px var(--mono)", color: "var(--faint)" }}>
+          ranked by decode tok/s · recommended config per model
+        </span>
+        <span className="spacer" />
+        {!suite.running && done.length > 0 && <button onClick={onExport}>Export Report ⇣</button>}
+        {!suite.running && <button onClick={onClose}>✕</button>}
+      </div>
+      <div className="board-cols">
+        <span className="c-rank">#</span>
+        <span className="c-name">Model · Config</span>
+        <span className="c-bar">Decode tok/s</span>
+        <span className="c-num">Prefill</span>
+        <span className="c-num small">Load</span>
+        <span className="c-num">Peak VRAM</span>
+      </div>
+      {ranked.map((r, i) => {
+        const ratio = best > 0 ? r.decode_tok_s / best : 0;
+        const isBest = i === 0 && r.decode_tok_s > 0;
+        const fillCls = isBest ? "best" : ratio >= 0.5 ? "" : ratio >= 0.1 ? "slow" : "bad";
+        return (
+          <div key={r.model} className="board-row">
+            <span className="c-rank" style={{ color: isBest ? "var(--plasma)" : "var(--low)" }}>
+              {String(i + 1).padStart(2, "0")}
+            </span>
+            <span className="c-name" title={r.model}>
+              {r.model}{" "}
+              <span className="sub">
+                {r.quant ?? ""} · {r.n_gpu_layers}L · {ctxLabel(r.ctx_size)}
+              </span>
+            </span>
+            <span className="c-bar">
+              <span className="track">
+                <span className={`fill ${fillCls}`} style={{ width: `${Math.max(2, ratio * 100)}%` }} />
+              </span>
+              <span className={`c-val ${isBest ? "best" : ""}`}>{r.decode_tok_s.toFixed(1)}</span>
+            </span>
+            <span className="c-num">{Math.round(r.prefill_tok_s).toLocaleString()}</span>
+            <span className="c-num small">{(r.load_ms / 1000).toFixed(1)}s</span>
+            <span className="c-num">{gb(r.peak_vram_bytes, 1)} GB</span>
+          </div>
+        );
+      })}
+      {skipped.map((r) => (
+        <div key={r.model} className="board-row skipped" title={r.skipped ?? undefined}>
+          <span className="c-rank">—</span>
+          <span className="c-name">{r.model}</span>
+          <span className="c-bar" style={{ color: "var(--low)", font: "11px var(--mono)" }}>
+            skipped · {r.skipped}
+          </span>
+        </div>
+      ))}
+      {suite.running && (
+        <div className="board-row pending">
+          measuring {suite.current ?? "…"} — loading + generating on the bench port…{" "}
+          {suite.rows.length}/{suite.total}
+        </div>
+      )}
+      <div className="board-foot">
+        {suite.exportPath
+          ? `report saved: ${suite.exportPath}`
+          : !suite.running && done.length > 0
+            ? "measured on your GPU — real generation, not estimated"
+            : ""}
+      </div>
+    </div>
+  );
+}
+
+function fmtUptime(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
+
+function dirOf(path: string): string {
+  return path.slice(0, Math.max(path.lastIndexOf("\\"), path.lastIndexOf("/")));
 }

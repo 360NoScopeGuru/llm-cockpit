@@ -1,55 +1,120 @@
+import { Flux, FluxSample } from "./Flux";
 import {
-  BenchResult,
   InferenceMetrics,
-  ModelEntry,
-  SuiteRow,
+  ServerStatus,
   TelemetrySnapshot,
   VramEstimate,
-  ctxLabel,
   gb,
-  modelLabel,
 } from "./types";
 
-// Right bay: system vitals always on top; below, a contextual panel — bench
-// results while a benchmark runs, otherwise the selected model's config detail
-// (recommendation, VRAM budget breakdown, context ladder).
+// Telemetry stack (right panel): flux trace on top, decode headline, the
+// VRAM rod bank (1 rod ≈ 1 GB; hovering a model in the library projects its
+// footprint as dashed ghost rods), the vitals grid, and KV containment at
+// the bottom — which goes into a pulsing alert at 90%.
+
+export interface Ghost {
+  name: string;
+  bytes: number;
+  fits: boolean;
+  layers: string | null;
+}
 
 interface RailProps {
   telemetry: TelemetrySnapshot | null;
   metrics: InferenceMetrics | null;
-  selected: ModelEntry | null;
-  estimate: VramEstimate | null;
-  bench: { name: string; expected: number; results: BenchResult[] } | null;
-  benching: boolean;
-  suite: { running: boolean; current: string | null; total: number; rows: SuiteRow[]; exportPath: string | null } | null;
-  busy: boolean;
-  onIgniteWith: (m: ModelEntry, ngl: number, ctx: number) => void;
-  onCloseBench: () => void;
-  onCloseSuite: () => void;
-  onExportSuite: () => void;
+  server: ServerStatus | null;
+  liveEst: VramEstimate | null;
+  ghost: Ghost | null;
+  ctxSize: number | null;
+  history: FluxSample[];
+  kvAlert: boolean;
 }
 
-function Slim({
+interface Seg {
+  bytes: number;
+  color: string;
+}
+
+function RodBank({
+  totalBytes,
+  segments,
+  ghostBytes,
+  ghostFits,
+}: {
+  totalBytes: number;
+  segments: Seg[];
+  ghostBytes: number;
+  ghostFits: boolean;
+}) {
+  const GB = 1e9;
+  const rods = Math.min(32, Math.max(8, Math.round(totalBytes / GB)));
+  const perRod = totalBytes / rods;
+  const usedBytes = segments.reduce((s, x) => s + x.bytes, 0);
+
+  const els = [];
+  for (let i = 0; i < rods; i++) {
+    const lo = i * perRod;
+    const hi = lo + perRod;
+    if (lo >= usedBytes && ghostBytes > 0 && lo < usedBytes + ghostBytes) {
+      els.push(<div key={i} className={`rod ghost ${ghostFits ? "" : "bad"}`} />);
+      continue;
+    }
+    // Build this rod's fill as a bottom-up gradient across the segments that
+    // overlap [lo, hi).
+    const stops: string[] = [];
+    let cum = 0;
+    let prevPct = 0;
+    for (const s of segments) {
+      const segLo = cum;
+      const segHi = cum + s.bytes;
+      cum = segHi;
+      const overlap = Math.min(hi, segHi) - Math.max(lo, segLo);
+      if (overlap <= 0) continue;
+      const pct = prevPct + (overlap / perRod) * 100;
+      stops.push(`${s.color} ${prevPct.toFixed(1)}% ${pct.toFixed(1)}%`);
+      prevPct = pct;
+    }
+    stops.push(`transparent ${prevPct.toFixed(1)}% 100%`);
+    els.push(
+      <div key={i} className="rod" style={{ background: `linear-gradient(0deg, ${stops.join(", ")})` }} />
+    );
+  }
+
+  const ticks = [];
+  for (let i = 0; i < rods; i++) {
+    const n = i + 1;
+    ticks.push(
+      <span key={i} style={{ flex: 1, textAlign: "center" }}>
+        {n === 1 || n % 4 === 0 ? n : ""}
+      </span>
+    );
+  }
+
+  return (
+    <>
+      <div className="rodbank">{els}</div>
+      <div className="rod-ticks">{ticks}</div>
+    </>
+  );
+}
+
+function Vital({
   label,
-  pct,
-  text,
+  value,
+  unit,
+  tone,
 }: {
   label: string;
-  pct: number;
-  text: string;
+  value: string;
+  unit: string;
+  tone?: "hot" | "warm" | "bad";
 }) {
-  const cls = pct >= 85 ? "hot" : pct >= 60 ? "warm" : "";
   return (
-    <div className="slim">
-      <div className="slim-head">
-        <span>{label}</span>
-        <b>{text}</b>
-      </div>
-      <div className="slim-track">
-        <div
-          className={`slim-fill ${cls}`}
-          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-        />
+    <div className="vital">
+      <div className="lbl faint">{label}</div>
+      <div className={`num ${tone ?? ""}`}>
+        {value}
+        <small> {unit}</small>
       </div>
     </div>
   );
@@ -58,327 +123,135 @@ function Slim({
 export function Rail(p: RailProps) {
   const t = p.telemetry;
   const g = t?.gpus[0] ?? null;
-  const ramPct = t && t.ram_total_bytes > 0 ? (t.ram_used_bytes / t.ram_total_bytes) * 100 : 0;
+  const live = !!p.server?.running && p.server.health === "ok";
+  const generating = live && (p.metrics?.requests_processing ?? 0) > 0;
+
+  const vramTotal = g?.vram_total_bytes ?? 0;
+  const vramUsed = g?.vram_used_bytes ?? 0;
+
+  // Segment the rod bank: while our reactor is live, break its footprint
+  // into weights / KV used / KV reserved + overhead from the estimate, with
+  // anything else on the card (desktop, other apps) as a leading dim band.
+  let segments: Seg[];
+  const kvRatio = p.metrics?.kv_cache_usage_ratio ?? 0;
+  if (live && p.liveEst) {
+    const e = p.liveEst;
+    const kvUsed = e.est_kv_bytes * kvRatio;
+    const kvRest = e.est_kv_bytes - kvUsed + e.est_overhead_bytes;
+    const other = Math.max(0, vramUsed - (e.est_weights_bytes + e.est_kv_bytes + e.est_overhead_bytes));
+    segments = [
+      { bytes: other, color: "#3b3229" },
+      { bytes: e.est_weights_bytes, color: "#eda03f" },
+      { bytes: kvUsed, color: "#c07f2e" },
+      { bytes: kvRest, color: "#8a5f2a" },
+    ];
+  } else {
+    segments = [{ bytes: vramUsed, color: "#8a5f2a" }];
+  }
+
+  const ghostBytes = p.ghost ? Math.max(0, p.ghost.bytes) : 0;
+  const ghostOver = p.ghost ? vramUsed + p.ghost.bytes > vramTotal : false;
+
+  const kvTokens = p.metrics?.kv_cache_tokens ?? 0;
+  const kvPct = Math.round(kvRatio * 100);
+
+  const tempTone = g?.temperature_c == null ? undefined : g.temperature_c >= 85 ? "bad" : g.temperature_c >= 72 ? "warm" : live ? "hot" : undefined;
+  const activeTone = live ? ("hot" as const) : undefined;
 
   return (
-    <div className="bay right">
-      <div className="rail-section">
-        <h4 className="microlabel">system</h4>
-        <Slim
-          label="RAM"
-          pct={ramPct}
-          text={t ? `${gb(t.ram_used_bytes)} / ${gb(t.ram_total_bytes)} gb` : "—"}
-        />
-        <Slim label="CPU" pct={t?.cpu_util_pct ?? 0} text={`${(t?.cpu_util_pct ?? 0).toFixed(0)}%`} />
-        {g && (
-          <div className="grid2">
-            <div className="stat">
-              <span className="microlabel">gpu temp</span>
-              <span className="num">
-                {g.temperature_c ?? "—"}
-                <small> °c</small>
-              </span>
-            </div>
-            <div className="stat">
-              <span className="microlabel">power</span>
-              <span className="num">
-                {g.power_watts?.toFixed(0) ?? "—"}
-                <small> / {g.power_limit_watts?.toFixed(0) ?? "—"} w</small>
-              </span>
-            </div>
-            <div className="stat">
-              <span className="microlabel">core clock</span>
-              <span className="num">
-                {g.clock_graphics_mhz ?? "—"}
-                <small> mhz</small>
-              </span>
-            </div>
-            <div className="stat">
-              <span className="microlabel">mem clock</span>
-              <span className="num">
-                {g.clock_mem_mhz ?? "—"}
-                <small> mhz</small>
-              </span>
-            </div>
-          </div>
-        )}
-        {p.metrics && (
-          <div className="grid2" style={{ marginTop: 10 }}>
-            <div className="stat">
-              <span className="microlabel">tokens out</span>
-              <span className="num">{p.metrics.predicted_tokens_total.toFixed(0)}</span>
-            </div>
-            <div className="stat">
-              <span className="microlabel">kv cache</span>
-              <span className="num">
-                {(p.metrics.kv_cache_usage_ratio * 100).toFixed(0)}
-                <small> %</small>
-              </span>
-            </div>
-          </div>
-        )}
+    <div className="rail">
+      <div className="rail-block">
+        <div className="rail-head">
+          <span className="lbl">Flux Trace</span>
+          <span className="note">60 s · 1 Hz</span>
+        </div>
+        <Flux history={p.history} alert={p.kvAlert} />
       </div>
 
-      {p.suite ? (
-        <SuitePanel
-          suite={p.suite}
-          onClose={p.onCloseSuite}
-          onExport={p.onExportSuite}
-        />
-      ) : p.bench ? (
-        <div className="rail-section">
-          <h4 className="microlabel">
-            bench · {p.bench.name}
-            {!p.benching && (
-              <button style={{ float: "right", padding: "0 6px", fontSize: 10 }} onClick={p.onCloseBench}>
-                ✕
-              </button>
-            )}
-          </h4>
-          <BenchRows bench={p.bench} benching={p.benching} />
+      <div className="rail-block headline">
+        <div className="lbl">Decode</div>
+        <div className={`big ${generating ? "" : "idle"}`}>
+          {p.metrics ? p.metrics.predicted_tokens_per_sec.toFixed(1) : "0.0"}
+          <small> tok/s</small>
         </div>
-      ) : p.selected && p.estimate ? (
-        <ConfigPanel
-          model={p.selected}
-          est={p.estimate}
-          busy={p.busy}
-          onIgniteWith={p.onIgniteWith}
-        />
-      ) : (
-        <div className="rail-section">
-          <h4 className="microlabel">config</h4>
-          <div className="empty-pad">Select a craft in the hangar to see its optimal configuration.</div>
+        <div className="sub">
+          {p.metrics
+            ? `prefill ${Math.round(p.metrics.prompt_tokens_per_sec).toLocaleString()} tok/s · total ${p.metrics.predicted_tokens_total.toLocaleString()} tok`
+            : "no reactor lit"}
         </div>
-      )}
-    </div>
-  );
-}
+      </div>
 
-function BenchRows({
-  bench,
-  benching,
-}: {
-  bench: { expected: number; results: BenchResult[] };
-  benching: boolean;
-}) {
-  const best = bench.results.reduce(
-    (m, r) => (r.loaded && r.decode_tok_s > m ? r.decode_tok_s : m),
-    0
-  );
-  return (
-    <div className="bench-rows">
-      {bench.results.map((r, i) => (
-        <div key={i} className={`bench-row ${r.loaded && r.decode_tok_s === best && best > 0 ? "best" : ""}`}>
-          <div className="rowhead">
-            <span>
-              ngl {r.n_gpu_layers} · ctx {ctxLabel(r.ctx_size)}
-            </span>
-            <span>{r.loaded ? `${(r.load_ms / 1000).toFixed(1)}s load` : ""}</span>
-          </div>
-          {r.loaded ? (
-            <div className="rowmain">
-              <span className="decode">
-                {r.decode_tok_s.toFixed(1)} <small>TOK/S</small>
-              </span>
-              <span className="aux">
-                prefill {r.prefill_tok_s.toFixed(0)}
-                <br />
-                peak {gb(r.peak_vram_bytes, 2)} gb
-              </span>
-            </div>
-          ) : (
-            <div className="err">{r.error}</div>
-          )}
-        </div>
-      ))}
-      {benching &&
-        Array.from({ length: Math.max(0, bench.expected - bench.results.length) }).map((_, i) => (
-          <div key={`p${i}`} className="bench-row pending">
-            measuring{i === 0 && bench.results.length === 0 ? " — loading model" : ""}…
-          </div>
-        ))}
-      {!benching && best > 0 && (
-        <div className="microlabel" style={{ marginTop: 4 }}>
-          measured on your gpu — not estimated
-        </div>
-      )}
-    </div>
-  );
-}
-
-function ConfigPanel({
-  model,
-  est,
-  busy,
-  onIgniteWith,
-}: {
-  model: ModelEntry;
-  est: VramEstimate;
-  busy: boolean;
-  onIgniteWith: (m: ModelEntry, ngl: number, ctx: number) => void;
-}) {
-  const total = est.est_total_bytes || 1;
-  const pct = (b: number) => `${(b / total) * 100}%`;
-  return (
-    <div className="rail-section">
-      <h4 className="microlabel">config · {modelLabel(model)}</h4>
-      <div className="reco-line">
-        <span className="big">
-          {est.full_offload ? "FULL GPU" : est.fits ? `${est.n_gpu_layers} LAYERS` : "CPU ONLY"}
-        </span>
-        <span className="num" style={{ color: "var(--muted)", fontSize: 11 }}>
-          @ {ctxLabel(est.ctx_size)} ctx
-        </span>
-      </div>
-      <div className="stackbar">
-        <div className="w" style={{ width: pct(est.est_weights_bytes) }} />
-        <div className="k" style={{ width: pct(est.est_kv_bytes) }} />
-        <div className="o" style={{ width: pct(est.est_overhead_bytes) }} />
-      </div>
-      <div className="legend">
-        <span>
-          <i className="iw" />
-          weights {gb(est.est_weights_bytes)}g
-        </span>
-        <span>
-          <i className="ik" />
-          kv {gb(est.est_kv_bytes)}g
-        </span>
-        <span>
-          <i className="io" />
-          sys {gb(est.est_overhead_bytes)}g
-        </span>
-      </div>
-      <span className="microlabel">context ladder (full offload)</span>
-      <div className="ladder">
-        {est.context_options.map((o) => (
-          <div key={o.ctx} className="rung">
-            <b>{ctxLabel(o.ctx)}</b>
-            <span>{gb(o.est_total_bytes)} gb</span>
-            <span className={o.fits ? "yes" : "no"}>{o.fits ? "✓" : "✗"}</span>
-          </div>
-        ))}
-      </div>
-      {est.quant_advice && <QuantAdvisor advice={est.quant_advice} />}
-      {est.notes.length > 0 && (
-        <ul className="rail-notes">
-          {est.notes.map((n, i) => (
-            <li key={i}>{n}</li>
-          ))}
-        </ul>
-      )}
-      <button
-        className="ignite wide-btn"
-        disabled={busy}
-        onClick={() => onIgniteWith(model, est.n_gpu_layers, est.ctx_size)}
-      >
-        IGNITE · ngl {est.n_gpu_layers} · ctx {ctxLabel(est.ctx_size)}
-      </button>
-    </div>
-  );
-}
-
-function QuantAdvisor({ advice }: { advice: import("./types").QuantAdvice }) {
-  const rec = advice.recommended;
-  const cur = advice.current_label;
-  const curIsRec = !!rec && !!cur && cur.toUpperCase().startsWith(rec);
-  const recOpt = advice.options.find((o) => o.label === rec);
-  return (
-    <div style={{ marginTop: 12 }}>
-      <span className="microlabel">quant advisor · ~{advice.est_params_b.toFixed(0)}B params</span>
-      <div className="advisor-verdict">
-        {curIsRec ? (
-          <span className="fit full">
-            {cur} IS THE SWEET SPOT for this GPU
+      <div className="rail-block">
+        <div className="rail-head">
+          <span className="lbl">Rod Bank · VRAM</span>
+          <span className={`val ${p.ghost ? "ghosted" : ""}`}>
+            {p.ghost ? `◐ ${gb(vramUsed + ghostBytes)} ` : `${gb(vramUsed)} `}
+            <small>/ {gb(vramTotal)} GB</small>
           </span>
-        ) : rec ? (
-          <span className="fit partial" title={`This file is ${cur ?? "?"} — a ${rec} of the same model would fully fit`}>
-            {advice.current_fits ? `${cur} fits — ` : `${cur} won't fully fit — `}
-            get {rec} ({recOpt ? `${gb(recOpt.headroom_bytes)} gb headroom` : "fits"})
-          </span>
-        ) : (
-          <span className="fit none">no quant of this model fully fits this GPU</span>
+        </div>
+        {vramTotal > 0 && (
+          <RodBank
+            totalBytes={vramTotal}
+            segments={segments}
+            ghostBytes={ghostBytes}
+            ghostFits={p.ghost?.fits ?? true}
+          />
         )}
-      </div>
-      <div className="ladder">
-        {advice.options.map((o) => (
-          <div key={o.label} className="rung">
-            <b style={o.is_current ? { color: "var(--violet)" } : undefined}>
-              {o.label}
-              {o.is_current ? " ◂ this file" : ""}
-            </b>
-            <span>{gb(o.est_weights_bytes)} gb</span>
-            <span className={o.fits ? "yes" : "no"}>
-              {o.fits ? `✓ +${gb(o.headroom_bytes)}g` : "✗"}
-            </span>
+        {p.ghost ? (
+          <div className={`rod-caption ${ghostOver ? "bad" : "warn"}`}>
+            ghost = {p.ghost.name}
+            {p.ghost.layers ? ` · ${p.ghost.layers} layers` : ""}
+            {ghostOver ? " · over capacity" : ""}
           </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function SuitePanel({
-  suite,
-  onClose,
-  onExport,
-}: {
-  suite: { running: boolean; current: string | null; total: number; rows: SuiteRow[]; exportPath: string | null };
-  onClose: () => void;
-  onExport: () => void;
-}) {
-  const done = suite.rows.filter((r) => !r.skipped);
-  const best = done.reduce((m, r) => Math.max(m, r.decode_tok_s), 0);
-  return (
-    <div className="rail-section">
-      <h4 className="microlabel">
-        benchmark suite · {suite.rows.length}/{suite.total}
-        {!suite.running && (
-          <button style={{ float: "right", padding: "0 6px", fontSize: 10 }} onClick={onClose}>
-            ✕
-          </button>
-        )}
-      </h4>
-      {suite.rows.map((r, i) =>
-        r.skipped ? (
-          <div key={i} className="suite-bar skipped" title={r.skipped}>
-            <span className="suite-name">{r.model}</span>
-            <span className="suite-val">skipped · {r.skipped}</span>
+        ) : live && p.liveEst ? (
+          <div className="rod-caption">
+            weights {gb(p.liveEst.est_weights_bytes)} · kv {gb(p.liveEst.est_kv_bytes)} · ovh{" "}
+            {gb(p.liveEst.est_overhead_bytes)} GB
           </div>
         ) : (
-          <div key={i} className="suite-bar" title={`ngl ${r.n_gpu_layers} · ctx ${ctxLabel(r.ctx_size)} · peak ${gb(r.peak_vram_bytes, 2)} gb · load ${(r.load_ms / 1000).toFixed(1)}s`}>
-            <div className="suite-head">
-              <span className="suite-name">{r.model}</span>
-              <span className="suite-val num">
-                {r.decode_tok_s.toFixed(1)} <small>tok/s</small>
-              </span>
-            </div>
-            <div className="suite-track">
-              <div
-                className={`suite-fill ${best > 0 && r.decode_tok_s === best ? "best" : ""}`}
-                style={{ width: `${best > 0 ? (r.decode_tok_s / best) * 100 : 0}%` }}
-              />
-            </div>
-          </div>
-        )
-      )}
-      {suite.running && (
-        <div className="suite-bar running">
-          measuring {suite.current ?? "…"} — loading + generating…
+          <div className="rod-caption">1 rod ≈ 1 GB · hover a model to project its footprint</div>
+        )}
+      </div>
+
+      <div className="rail-block vitals">
+        <Vital label="GPU Util" value={`${Math.round(g?.gpu_util_pct ?? 0)}`} unit="%" tone={activeTone} />
+        <Vital label="Temp" value={g?.temperature_c != null ? `${g.temperature_c}` : "—"} unit="°C" tone={tempTone} />
+        <Vital
+          label="Power"
+          value={g?.power_watts != null ? g.power_watts.toFixed(0) : "—"}
+          unit={`/ ${g?.power_limit_watts?.toFixed(0) ?? "—"} W`}
+          tone={activeTone}
+        />
+        <Vital
+          label="Core · Mem"
+          value={g?.clock_graphics_mhz != null ? `${g.clock_graphics_mhz}` : "—"}
+          unit={`· ${g?.clock_mem_mhz ?? "—"} MHz`}
+          tone={activeTone}
+        />
+        <Vital
+          label="Sys RAM"
+          value={t ? gb(t.ram_used_bytes) : "—"}
+          unit={`/ ${t ? gb(t.ram_total_bytes, 0) : "—"} GB`}
+          tone={activeTone}
+        />
+        <Vital label="CPU" value={`${Math.round(t?.cpu_util_pct ?? 0)}`} unit="%" tone={activeTone} />
+      </div>
+
+      <div className={`kv-block ${p.kvAlert ? "alert" : ""}`}>
+        <div className="kv-head">
+          <span className="lbl">{p.kvAlert ? "KV Cache · Alert" : "KV Cache"}</span>
+          <span className={`kv-val ${p.metrics ? "" : "empty"}`}>
+            {p.metrics
+              ? p.ctxSize
+                ? `${kvTokens.toLocaleString()} / ${p.ctxSize.toLocaleString()} · ${kvPct}%`
+                : `${kvPct}%`
+              : "—"}
+          </span>
         </div>
-      )}
-      {!suite.running && done.length > 0 && (
-        <>
-          <button className="wide-btn" onClick={onExport}>
-            EXPORT MARKDOWN REPORT
-          </button>
-          {suite.exportPath && (
-            <div className="microlabel" style={{ marginTop: 6, wordBreak: "break-all", textTransform: "none", letterSpacing: 0 }}>
-              saved: {suite.exportPath}
-            </div>
-          )}
-        </>
-      )}
+        <div className="kv-bar">
+          <div className="fill" style={{ width: `${Math.min(100, kvPct)}%` }} />
+        </div>
+      </div>
     </div>
   );
 }
