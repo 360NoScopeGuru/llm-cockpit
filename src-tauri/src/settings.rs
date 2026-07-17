@@ -1,6 +1,6 @@
 //! Persisted app settings.
 //!
-//! A small JSON file in the OS config dir (e.g. `%APPDATA%\llm-cockpit` on
+//! A small JSON file in the OS config dir (e.g. `%APPDATA%\tokamak` on
 //! Windows) so user choices — currently the extra model folders to scan —
 //! survive restarts and stay out of the frontend's webview storage.
 
@@ -20,14 +20,23 @@ pub struct Settings {
 }
 
 fn settings_path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("tokamak").join("settings.json"))
+}
+
+/// Config file from before the app was renamed to Tokamak; read as a fallback
+/// so existing users keep their folders and binary choice.
+fn legacy_settings_path() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("llm-cockpit").join("settings.json"))
 }
 
 /// Load settings; any missing/corrupt file yields defaults.
 pub fn load() -> Settings {
-    settings_path()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str(&s).ok())
+    let read = |p: Option<PathBuf>| {
+        p.and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str(&s).ok())
+    };
+    read(settings_path())
+        .or_else(|| read(legacy_settings_path()))
         .unwrap_or_default()
 }
 

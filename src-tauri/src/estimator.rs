@@ -136,7 +136,14 @@ pub fn quant_advice(
     let current_up = current_quant.map(|c| c.to_ascii_uppercase());
     let mut options = Vec::new();
     let mut recommended: Option<String> = None;
-    let mut current_fits = false;
+    // Judge the current file by its own bpw, not by ladder membership — quants
+    // like Q4_K_S or Q3_K_L aren't ladder rows but still have a known size.
+    let mut current_fits = current_bpw
+        .map(|bpw| {
+            let weights = (params * bpw / 8.0 * 1.05) as u64;
+            weights + kv + OVERHEAD_BYTES <= budget
+        })
+        .unwrap_or(false);
 
     for (label, bpw) in QUANT_LADDER {
         // ~5% on top of raw weights for embeddings/output layers not captured

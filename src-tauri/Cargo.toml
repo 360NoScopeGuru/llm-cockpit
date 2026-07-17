@@ -1,7 +1,7 @@
 [package]
-name = "llm-cockpit"
+name = "tokamak"
 version = "0.1.0"
-description = "Inference cockpit for local LLMs — model library, hardware-aware auto-config, measured benchmarks, live telemetry"
+description = "Tokamak: a reactor room for local LLMs. Model library, hardware-aware auto-config, measured benchmarks, live telemetry."
 authors = ["vamsh <vamsheedharan@gmail.com>"]
 edition = "2021"
 
@@ -11,7 +11,7 @@ edition = "2021"
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
 # This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "llm_cockpit_lib"
+name = "tokamak_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

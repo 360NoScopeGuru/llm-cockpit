@@ -48,8 +48,18 @@ export function Console({ server }: { server: ServerStatus | null }) {
   const ready = server?.running && server.health === "ok";
 
   useEffect(() => {
+    // listen() resolves asynchronously; if this effect is torn down before the
+    // promise settles (StrictMode does exactly that on mount), the handler must
+    // still be unregistered — otherwise a second live listener doubles every
+    // streamed token.
+    let disposed = false;
     const unlistens: Array<() => void> = [];
-    listen<DeltaEvent>("chat-delta", (e) => {
+    const track = (p: Promise<() => void>) =>
+      p.then((u) => {
+        if (disposed) u();
+        else unlistens.push(u);
+      });
+    track(listen<DeltaEvent>("chat-delta", (e) => {
       if (e.payload.id !== genId.current) return;
       setTurns((prev) => {
         const next = [...prev];
@@ -61,8 +71,8 @@ export function Console({ server }: { server: ServerStatus | null }) {
         }
         return next;
       });
-    }).then((u) => unlistens.push(u));
-    listen<DoneEvent>("chat-done", (e) => {
+    }));
+    track(listen<DoneEvent>("chat-done", (e) => {
       if (e.payload.id !== genId.current) return;
       setStreaming(false);
       setTurns((prev) => {
@@ -84,8 +94,11 @@ export function Console({ server }: { server: ServerStatus | null }) {
         }
         return next;
       });
-    }).then((u) => unlistens.push(u));
-    return () => unlistens.forEach((u) => u());
+    }));
+    return () => {
+      disposed = true;
+      unlistens.forEach((u) => u());
+    };
   }, []);
 
   useEffect(() => {
@@ -104,16 +117,25 @@ export function Console({ server }: { server: ServerStatus | null }) {
       ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
       ...history.map((t) => ({ role: t.role, content: t.content })),
     ];
+    // NaN → undefined, but keep legitimate zeros (temp 0 = greedy decoding).
+    const num = (s: string) => {
+      const v = parseFloat(s);
+      return Number.isFinite(v) ? v : undefined;
+    };
+    const int = (s: string) => {
+      const v = parseInt(s, 10);
+      return Number.isFinite(v) ? v : undefined;
+    };
     try {
       await invoke("chat_send", {
         id,
         messages,
         params: {
-          temperature: parseFloat(temp) || undefined,
-          top_k: parseInt(topK) || undefined,
-          top_p: parseFloat(topP) || undefined,
-          min_p: parseFloat(minP) || undefined,
-          max_tokens: parseInt(maxTok) || undefined,
+          temperature: num(temp),
+          top_k: int(topK),
+          top_p: num(topP),
+          min_p: num(minP),
+          max_tokens: int(maxTok),
         },
       });
     } catch (e) {

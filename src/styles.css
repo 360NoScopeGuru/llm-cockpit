@@ -1,5 +1,5 @@
 /* ============================================================
-   LLM·COCKPIT — "The Core" design system
+   TOKAMAK — "The Core" design system
    A control-room instrument panel: near-black canvas, phosphor
    teal + violet signals, hairline strokes, monospace numerals.
    ============================================================ */
@@ -151,6 +151,14 @@ select:focus {
 }
 
 .wordmark .dim {
+  color: var(--muted);
+}
+
+.wordmark .tagline {
+  margin-left: 10px;
+  font-size: 9px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 

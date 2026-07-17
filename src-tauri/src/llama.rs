@@ -146,7 +146,7 @@ impl LlamaManager {
             return Err(format!("model file not found: {}", cfg.model_path));
         }
 
-        let log_path = std::env::temp_dir().join("llm-cockpit-llama-server.log");
+        let log_path = std::env::temp_dir().join("tokamak-llama-server.log");
         let log = File::create(&log_path).map_err(|e| format!("cannot open log: {e}"))?;
         let log2 = log
             .try_clone()

@@ -234,12 +234,15 @@ export default function App() {
             : prev
         );
       });
-      const final = await invoke<BenchResult[]>("benchmark_model", {
-        modelPath: m.path,
-        configs,
-      });
-      unlisten();
-      setBench((prev) => (prev && prev.path === m.path ? { ...prev, results: final } : prev));
+      try {
+        const final = await invoke<BenchResult[]>("benchmark_model", {
+          modelPath: m.path,
+          configs,
+        });
+        setBench((prev) => (prev && prev.path === m.path ? { ...prev, results: final } : prev));
+      } finally {
+        unlisten();
+      }
     } catch (e) {
       setError(String(e));
       setBench(null);
@@ -392,7 +395,8 @@ export default function App() {
     <div className="shell">
       <header className="hdr">
         <span className="wordmark">
-          <span className="hex">⬢</span> LLM<span className="dim">·</span>COCKPIT
+          <span className="hex">⬢</span> TOKA<span className="dim">·</span>MAK
+          <span className="tagline">local llm reactor</span>
         </span>
         <span className="hdr-spacer" />
         <span className="status-chip">

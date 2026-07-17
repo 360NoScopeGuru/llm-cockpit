@@ -175,8 +175,10 @@ fn post_completion(port: u16) -> Option<String> {
     let body = format!(
         r#"{{"prompt":"{BENCH_PROMPT}","n_predict":{N_PREDICT},"ignore_eos":true,"stream":false}}"#
     );
+    // Generous: a config spilled to CPU can take minutes for 96 tokens, and a
+    // slow measured number beats a false "generation failed".
     ureq::post(&url)
-        .timeout(Duration::from_secs(60))
+        .timeout(Duration::from_secs(180))
         .set("Content-Type", "application/json")
         .send_string(&body)
         .ok()?
@@ -214,7 +216,7 @@ pub struct ReportRow {
     pub peak_vram_bytes: u64,
 }
 
-/// Write a Markdown benchmark report to Documents\llm-cockpit and return its
+/// Write a Markdown benchmark report to Documents\tokamak and return its
 /// path. Rows are written in the order given; a ranking column is derived from
 /// decode speed.
 pub fn export_report(gpu_name: &str, rows: &[ReportRow]) -> Result<String, String> {
@@ -223,7 +225,7 @@ pub fn export_report(gpu_name: &str, rows: &[ReportRow]) -> Result<String, Strin
     }
     let dir = dirs::document_dir()
         .ok_or("no Documents dir on this platform")?
-        .join("llm-cockpit");
+        .join("tokamak");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
     let now = std::time::SystemTime::now()
@@ -239,7 +241,7 @@ pub fn export_report(gpu_name: &str, rows: &[ReportRow]) -> Result<String, Strin
 
     let mut md = String::new();
     md.push_str(&format!(
-        "# llm-cockpit benchmark report\n\nGPU: **{gpu_name}**  \nConfigs: auto-recommended per model (max offload + context that fit).  \nAll numbers measured on this machine — not estimates.\n\n"
+        "# Tokamak benchmark report\n\nGPU: **{gpu_name}**  \nConfigs: auto-recommended per model (max offload + context that fit).  \nAll numbers measured on this machine, not estimates.\n\n"
     ));
     md.push_str(
         "| Model | Quant | GPU layers | Ctx | Load | Prefill tok/s | Decode tok/s | Peak VRAM | vs best |\n|---|---|---|---|---|---|---|---|---|\n",
