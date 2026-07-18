@@ -17,6 +17,14 @@ pub struct Settings {
     /// best-ranked discovered binary when unset or missing on disk.
     #[serde(default)]
     pub preferred_binary: Option<String>,
+    /// UI zoom factor chosen by the user (1.0 = 100%); applied as CSS zoom on
+    /// the document root, on top of the DPI corrector.
+    #[serde(default)]
+    pub ui_scale: Option<f64>,
+    /// Folder the agent's tools are sandboxed to. None = agent unusable until
+    /// the user picks one.
+    #[serde(default)]
+    pub agent_workspace: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -72,6 +80,30 @@ pub fn add_model_dir(dir: &str) -> Result<Settings, String> {
 pub fn remove_model_dir(dir: &str) -> Result<Settings, String> {
     let mut s = load();
     s.extra_model_dirs.retain(|d| !d.eq_ignore_ascii_case(dir));
+    save(&s)?;
+    Ok(s)
+}
+
+/// Persist the user's UI zoom factor (clamped to a sane range).
+pub fn set_ui_scale(scale: f64) -> Result<Settings, String> {
+    if !(0.5..=2.5).contains(&scale) {
+        return Err(format!("ui scale out of range: {scale}"));
+    }
+    let mut s = load();
+    s.ui_scale = Some(scale);
+    save(&s)?;
+    Ok(s)
+}
+
+/// Persist the agent workspace folder (None disables the agent's tools).
+pub fn set_agent_workspace(dir: Option<String>) -> Result<Settings, String> {
+    if let Some(d) = &dir {
+        if !PathBuf::from(d).is_dir() {
+            return Err(format!("not a directory: {d}"));
+        }
+    }
+    let mut s = load();
+    s.agent_workspace = dir;
     save(&s)?;
     Ok(s)
 }

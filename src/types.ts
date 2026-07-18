@@ -151,6 +151,8 @@ export interface LlamaBinary {
 export interface Settings {
   extra_model_dirs: string[];
   preferred_binary: string | null;
+  ui_scale?: number | null;
+  agent_workspace?: string | null;
 }
 
 // ---- formatting helpers used across components ----
