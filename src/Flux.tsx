@@ -1,8 +1,12 @@
-import { useEffect, useRef } from "react";
-
 // Flux trace: 60 s of telemetry drawn as heat strips — brightness is the
 // value. Newest sample lands at the right edge; history slides left. The
 // third strip swaps from TEMP to KV pressure while containment is in alert.
+//
+// Deliberately NOT a <canvas>: accelerated canvases live in GPU memory, and
+// this app's whole job is to fill GPU memory with model weights. Under VRAM
+// pressure WebView2 evicts the canvas backing store and Chromium replaces it
+// with a "content lost" sad-face placeholder. CSS gradients are rasterized
+// per paint and cannot be lost.
 
 export interface FluxSample {
   decode: number;
@@ -12,6 +16,7 @@ export interface FluxSample {
 }
 
 const WINDOW = 60;
+const BASE = "#1a1614";
 
 // Piecewise-linear color ramp over hex stops.
 function ramp(stops: string[], v: number): string {
@@ -32,35 +37,21 @@ const UTIL_STOPS = ["#1a1614", "#6b4a1e", "#9a6524", "#c07f2e", "#e0972f"];
 const TEMP_STOPS = ["#1d1712", "#33251a", "#5a3d22", "#7d5226", "#96622a"];
 const KV_STOPS = ["#1a1614", "#4a2a1a", "#7d3a28", "#b04a36", "#d95c45"];
 
-function Strip({
-  values,
-  stops,
-}: {
-  values: number[]; // normalized 0..1, oldest first
-  stops: string[];
-}) {
-  const ref = useRef<HTMLCanvasElement>(null);
-  useEffect(() => {
-    const cv = ref.current;
-    if (!cv) return;
-    const dpr = window.devicePixelRatio || 1;
-    const w = cv.clientWidth * dpr;
-    const h = cv.clientHeight * dpr;
-    if (cv.width !== w) cv.width = w;
-    if (cv.height !== h) cv.height = h;
-    const ctx = cv.getContext("2d");
-    if (!ctx) return;
-    ctx.fillStyle = "#1a1614";
-    ctx.fillRect(0, 0, w, h);
-    const cell = w / WINDOW;
-    const start = WINDOW - values.length;
-    for (let i = 0; i < values.length; i++) {
-      ctx.fillStyle = ramp(stops, values[i]);
-      // +1px overlap hides seams from fractional cell widths.
-      ctx.fillRect((start + i) * cell, 0, cell + 1, h);
-    }
-  }, [values, stops]);
-  return <canvas ref={ref} />;
+function stripGradient(values: number[], stops: string[]): string {
+  if (values.length === 0) return BASE;
+  const start = WINDOW - values.length;
+  const segs: string[] = [];
+  if (start > 0) segs.push(`${BASE} 0% ${((start / WINDOW) * 100).toFixed(2)}%`);
+  for (let i = 0; i < values.length; i++) {
+    const a = (((start + i) / WINDOW) * 100).toFixed(2);
+    const b = (((start + i + 1) / WINDOW) * 100).toFixed(2);
+    segs.push(`${ramp(stops, values[i])} ${a}% ${b}%`);
+  }
+  return `linear-gradient(90deg, ${segs.join(", ")})`;
+}
+
+function Strip({ values, stops }: { values: number[]; stops: string[] }) {
+  return <div className="strip" style={{ background: stripGradient(values, stops) }} />;
 }
 
 export function Flux({ history, alert }: { history: FluxSample[]; alert: boolean }) {

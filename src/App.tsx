@@ -587,7 +587,7 @@ export default function App() {
           <Console
             server={server}
             metrics={metrics}
-            ctxSize={liveCfg?.ctx ?? null}
+            liveCfg={liveCfg}
             modelName={liveName}
             cfgText={
               liveCfg

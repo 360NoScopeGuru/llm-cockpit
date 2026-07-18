@@ -155,6 +155,61 @@ export interface Settings {
   agent_workspace?: string | null;
 }
 
+// ---- chat history (mirrors history.rs) ----
+
+export interface SamplerSnap {
+  temperature?: number | null;
+  top_k?: number | null;
+  top_p?: number | null;
+  min_p?: number | null;
+  max_tokens?: number | null;
+  system?: string | null;
+}
+
+export interface StoredTurn {
+  role: string;
+  kind?: string | null;
+  tool_name?: string | null;
+  content: string;
+  thinking?: string | null;
+  tokens?: number | null;
+  decode_tok_s?: number | null;
+  stopped?: boolean | null;
+  error?: boolean | null;
+  timestamp_ms: number;
+  sampler?: SamplerSnap | null;
+}
+
+export interface StoredSession {
+  id: string;
+  kind: string;
+  title: string;
+  model_name?: string | null;
+  model_path?: string | null;
+  binary_label?: string | null;
+  n_gpu_layers?: number | null;
+  ctx_size?: number | null;
+  workspace?: string | null;
+  created_ms: number;
+  updated_ms: number;
+  turns: StoredTurn[];
+}
+
+export interface SessionMeta {
+  id: string;
+  kind: string;
+  title: string;
+  model_name: string | null;
+  n_gpu_layers: number | null;
+  ctx_size: number | null;
+  workspace: string | null;
+  created_ms: number;
+  updated_ms: number;
+  turn_count: number;
+  total_tokens: number;
+  avg_decode_tok_s: number;
+}
+
 // ---- formatting helpers used across components ----
 
 export function gb(bytes: number, digits = 1): string {
