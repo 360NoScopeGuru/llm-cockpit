@@ -158,6 +158,32 @@
   .roadmap .st.done{color:var(--good);border-color:#3c5236}
   .roadmap .st.now{color:var(--plasma);border-color:var(--plasma-deep)}
 
+
+  .btn.ghost{background:transparent;color:var(--mid)}
+  .install-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:34px}
+  .install-grid > *{min-width:0}
+  @media(max-width:820px){.install-grid{grid-template-columns:1fr}}
+  .install-card{
+    display:flex;flex-direction:column;gap:9px;padding:24px 22px;
+    border:1px solid var(--hair);border-radius:5px;background:var(--bg1);
+  }
+  a.install-card{text-decoration:none}
+  a.install-card:hover{border-color:var(--plasma-deep);background:var(--bg2);text-decoration:none}
+  .install-card.primary{border-color:var(--plasma-deep)}
+  .install-card .ic{font-size:19px;color:var(--plasma);line-height:1}
+  .install-card .t{font:600 16px var(--sans);color:var(--hi)}
+  .install-card .d{color:var(--low);font-size:14.5px;line-height:1.62;overflow-wrap:anywhere}
+  .install-card .go{
+    margin-top:auto;padding-top:6px;font:12px var(--mono);
+    letter-spacing:.08em;color:var(--plasma);
+  }
+  .note-line{margin-top:20px;color:var(--faint);font-size:13.5px}
+  details.src{margin-top:22px;border-top:1px solid var(--hair2);padding-top:16px}
+  details.src summary{
+    cursor:pointer;font:12px var(--mono);letter-spacing:.08em;color:var(--mid);
+  }
+  details.src summary:hover{color:var(--plasma)}
+  details.src p{color:var(--low);font-size:14px;margin:14px 0 0}
   footer{padding:44px 0 60px;color:var(--faint);font-size:13.5px}
   footer .row{display:flex;gap:22px;flex-wrap:wrap;align-items:center}
   footer .sp{margin-left:auto}
@@ -172,7 +198,7 @@
     <nav>
       <a href="#why" class="sm">Why</a>
       <a href="#features" class="sm">Features</a>
-      <a href="#start" class="opt">Get started</a>
+      <a href="#install" class="opt">Install</a>
       <a href="#roadmap" class="opt">Roadmap</a>
       <a href="https://github.com/360NoScopeGuru/tokamak">GitHub&nbsp;&rarr;</a>
     </nav>
@@ -180,7 +206,7 @@
 </header>
 
 <div class="wrap hero">
-  <span class="chip">v0.1 &middot; WINDOWS + NVIDIA &middot; TAURI 2 + REACT</span>
+  <span class="chip">v0.1.1 &middot; WINDOWS + NVIDIA &middot; TAURI 2 + REACT</span>
   <h1>A reactor room for<br>your local LLMs.</h1>
   <p class="lede">
     Tokamak finds the GGUF models you already have, works out the best way to run
@@ -194,8 +220,9 @@
     which is the only unit anyone here cares about.
   </p>
   <div class="cta">
-    <a class="btn primary" href="#start">Build it</a>
-    <a class="btn" href="https://github.com/360NoScopeGuru/tokamak">Source on GitHub</a>
+    <a class="btn primary" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">&#11015; Download for Windows</a>
+    <a class="btn" href="#install">Install guide</a>
+    <a class="btn ghost" href="https://github.com/360NoScopeGuru/tokamak">Source on GitHub</a>
   </div>
 
   <div class="panel" role="img" aria-label="Stylised depiction of the Tokamak instrument panel: decode rate, flux trace heat strips, and a VRAM rod bank.">
@@ -235,6 +262,54 @@
     </div>
   </div>
 </div>
+
+<section id="install">
+  <div class="wrap">
+    <div class="eyebrow">INSTALL</div>
+    <h2>Download it and run it.</h2>
+    <p class="intro">
+      No Rust, no Node, no toolchain. Installers are built by CI on every tagged
+      version.
+    </p>
+
+    <div class="install-grid">
+      <a class="install-card primary" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
+        <span class="ic">&#11015;</span>
+        <span class="t">Windows installer</span>
+        <span class="d">Grab the <code>.msi</code> from the latest release and run it.</span>
+        <span class="go">Latest release &rarr;</span>
+      </a>
+      <div class="install-card">
+        <span class="ic">&#9881;</span>
+        <span class="t">What you also need</span>
+        <span class="d">
+          An <b>NVIDIA GPU</b> (telemetry and benchmarking use NVML), and a
+          <code>llama-server</code> binary &mdash; found automatically if LM Studio
+          is installed, otherwise put llama.cpp&rsquo;s on your PATH.
+        </span>
+        <span class="d">
+          Models are optional: Tokamak reads your existing Hugging Face,
+          LM Studio and Ollama caches, and can download new ones itself.
+        </span>
+      </div>
+    </div>
+
+    <p class="note-line">
+      Windows will warn that the publisher is unknown &mdash; the build is
+      unsigned. Choose <b>More info &rarr; Run anyway</b>.
+    </p>
+
+    <details class="src">
+      <summary>Building from source instead</summary>
+      <p>Needs Rust (stable) and Node.js 20+.</p>
+<pre><span class="c">git</span> clone https://github.com/360NoScopeGuru/tokamak
+<span class="c">cd</span> tokamak
+<span class="c">npm</span> install
+<span class="c">npm</span> run tauri dev      <span class="c"># development</span>
+<span class="c">npm</span> run tauri build    <span class="c"># release build</span></pre>
+    </details>
+  </div>
+</section>
 
 <section id="why">
   <div class="wrap">
@@ -352,39 +427,6 @@
   </div>
 </section>
 
-<section id="start">
-  <div class="wrap">
-    <div class="eyebrow">GET STARTED</div>
-    <h2>Build it from source.</h2>
-    <p class="intro">
-      There is no packaged release yet &mdash; Tokamak is v0.1 and built from source.
-      Windows 10/11 with an NVIDIA GPU, since telemetry and benchmarking use NVML.
-    </p>
-    <div class="steps">
-      <div>
-        <h3>You&rsquo;ll need</h3>
-        <ul>
-          <li>Rust (stable) and Node.js 20+</li>
-          <li>A <code>llama-server</code> binary &mdash; if LM Studio is installed,
-              Tokamak finds its bundled builds automatically; otherwise put
-              llama.cpp&rsquo;s on your PATH</li>
-          <li>Some GGUF models on disk (LM Studio, Hugging Face, Ollama, or any folder)</li>
-        </ul>
-      </div>
-      <div>
-        <h3>Run it</h3>
-<pre><span class="c">git</span> clone https://github.com/360NoScopeGuru/tokamak
-<span class="c">cd</span> tokamak
-<span class="c">npm</span> install
-<span class="c">npm</span> run tauri dev
-
-<span class="c"># release build</span>
-<span class="c">npm</span> run tauri build</pre>
-      </div>
-    </div>
-  </div>
-</section>
-
 <section id="roadmap">
   <div class="wrap">
     <div class="eyebrow">ROADMAP</div>
@@ -423,7 +465,7 @@
 <footer>
   <div class="wrap row">
     <span class="brand" style="font-size:13px">TOKAMAK</span>
-    <span>v0.1 &middot; Windows + NVIDIA first</span>
+    <span>v0.1.1 &middot; Windows + NVIDIA first</span>
     <span class="sp"><a href="https://github.com/360NoScopeGuru/tokamak">github.com/360NoScopeGuru/tokamak</a></span>
   </div>
 </footer>
