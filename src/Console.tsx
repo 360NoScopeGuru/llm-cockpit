@@ -76,6 +76,9 @@ interface DoneEvent {
   tokens: number;
   decode_tok_s: number;
   stopped: boolean;
+  /// "stop" = the model finished. "length" = it was cut off. null = the stream
+  /// died without saying why.
+  finish: string | null;
   error: string | null;
 }
 
@@ -149,9 +152,23 @@ function stripToolBlock(content: string): string {
   return content.replace(/```tool\s*\n?[\s\S]*?```\s*$/, "").trimEnd();
 }
 
-function metaLine(tokens?: number | null, rate?: number | null, stopped?: boolean | null) {
+function metaLine(
+  tokens?: number | null,
+  rate?: number | null,
+  stopped?: boolean | null,
+  finish?: string | null
+) {
   if (tokens == null || rate == null) return undefined;
-  return `${tokens} tok · ${rate.toFixed(1)} tok/s${stopped ? " · stopped" : ""}`;
+  // An answer that ends early must say so. Silence here is what made
+  // truncation feel like a random bug rather than a limit being hit.
+  const why = stopped
+    ? " · stopped by you"
+    : finish === "length"
+      ? " · ⚠ CUT OFF — raise max, or the context is full"
+      : finish == null
+        ? " · ⚠ stream ended early"
+        : "";
+  return `${tokens} tok · ${rate.toFixed(1)} tok/s${why}`;
 }
 
 function fmtDate(ms: number): string {
@@ -173,7 +190,11 @@ export function Console(p: ConsoleProps) {
   const [topK, setTopK] = useState("40");
   const [topP, setTopP] = useState("0.95");
   const [minP, setMinP] = useState("0.05");
-  const [maxTok, setMaxTok] = useState("2048");
+  // Empty = unlimited: let the model run until it hits EOS or fills the
+  // context, which is llama.cpp's own default (n_predict = -1). A finite
+  // default here silently guillotines long answers — and on reasoning models
+  // the thinking tokens eat the budget before the answer even starts.
+  const [maxTok, setMaxTok] = useState("");
   const [copied, setCopied] = useState(false);
   const [pendingTool, setPendingTool] = useState<ToolCall | null>(null);
   const [toolBusy, setToolBusy] = useState(false);
@@ -186,7 +207,7 @@ export function Console(p: ConsoleProps) {
   const streamTab = useRef<TabKind>("chat");
   const wsRef = useRef<string | null>(null);
   const systemRef = useRef("");
-  const samplerRef = useRef({ temp: "0.7", topK: "40", topP: "0.95", minP: "0.05", maxTok: "2048" });
+  const samplerRef = useRef({ temp: "0.7", topK: "40", topP: "0.95", minP: "0.05", maxTok: "" });
   const serverRef = useRef<ServerStatus | null>(null);
   const cfgRef = useRef<{ ngl: number; ctx: number } | null>(null);
   const modelNameRef = useRef<string | null>(null);
@@ -305,6 +326,12 @@ export function Console(p: ConsoleProps) {
       const n = parseInt(v, 10);
       return Number.isFinite(n) ? n : undefined;
     };
+    // Blank, 0 or a negative all mean "no cap" — omit the field entirely so the
+    // server falls back to n_predict = -1 rather than being handed a limit.
+    const cap = (v: string) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    };
     try {
       await invoke("chat_send", {
         id,
@@ -314,7 +341,7 @@ export function Console(p: ConsoleProps) {
           top_k: int(s.topK),
           top_p: num(s.topP),
           min_p: num(s.minP),
-          max_tokens: int(s.maxTok),
+          max_tokens: cap(s.maxTok),
         },
       });
     } catch (e) {
@@ -494,7 +521,12 @@ export function Console(p: ConsoleProps) {
               stopped: e.payload.stopped,
               meta: e.payload.error
                 ? undefined
-                : metaLine(e.payload.tokens, e.payload.decode_tok_s, e.payload.stopped),
+                : metaLine(
+                    e.payload.tokens,
+                    e.payload.decode_tok_s,
+                    e.payload.stopped,
+                    e.payload.finish
+                  ),
             };
           }
           return next;
@@ -660,13 +692,19 @@ export function Console(p: ConsoleProps) {
   const busyLoop = streaming || toolBusy || !!pendingTool;
   const ctxSize = p.liveCfg?.ctx ?? null;
 
-  const sampler = (label: string, value: string, set: (v: string) => void, wide = false) => (
+  const sampler = (
+    label: string,
+    value: string,
+    set: (v: string) => void,
+    wide = false,
+    placeholder?: string
+  ) => (
     <span className="sampler">
       {label}
       <input
         className={wide ? "wide" : ""}
         value={value}
-        placeholder={wide ? "(none)" : ""}
+        placeholder={placeholder ?? (wide ? "(none)" : "")}
         onChange={(e) => set(e.target.value)}
       />
     </span>
@@ -995,7 +1033,7 @@ export function Console(p: ConsoleProps) {
             {sampler("top-k", topK, setTopK)}
             {sampler("top-p", topP, setTopP)}
             {sampler("min-p", minP, setMinP)}
-            {sampler("max", maxTok, setMaxTok)}
+            {sampler("max", maxTok, setMaxTok, false, "∞")}
             {sampler("sys", system, setSystem, true)}
           </div>
           <div className="composer">
