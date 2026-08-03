@@ -31,7 +31,7 @@ choose **More info → Run anyway**.
 | | |
 |---|---|
 | **GPU** | NVIDIA — telemetry and benchmarking use NVML |
-| **A `llama-server` binary** | Found automatically if LM Studio is installed; otherwise put llama.cpp's on your PATH |
+| **Inference runtime** | None. On first run Tokamak offers to fetch the right llama.cpp build for your GPU (CUDA, Vulkan or CPU) and manages it itself. If you already have LM Studio or llama.cpp, it uses those instead |
 | **Models** | Optional. Tokamak reads your existing Hugging Face / LM Studio / Ollama caches, and can download new ones itself |
 
 <details>

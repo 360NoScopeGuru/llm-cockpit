@@ -338,7 +338,7 @@ fn spawn_stream(
 
 /// Core download loop. Takes a progress callback rather than a `Window` so it
 /// can be exercised in tests without a running Tauri app.
-fn stream_to_disk(
+pub(crate) fn stream_to_disk(
     on_progress: &dyn Fn(u64, u64, f64),
     url: &str,
     dest: &Path,

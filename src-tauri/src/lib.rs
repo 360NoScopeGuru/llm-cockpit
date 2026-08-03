@@ -10,6 +10,7 @@ mod gguf;
 mod history;
 mod llama;
 mod ollama;
+mod runtime;
 mod scanner;
 mod settings;
 mod telemetry;
@@ -160,6 +161,25 @@ fn chat_send(
 #[tauri::command]
 fn chat_cancel(chat_state: State<'_, chat::ChatState>) {
     chat_state.cancel();
+}
+
+/// Is a managed llama.cpp runtime installed?
+#[tauri::command]
+fn runtime_status() -> runtime::RuntimeStatus {
+    runtime::status()
+}
+
+/// Installable llama.cpp builds for this machine, with real download sizes.
+#[tauri::command]
+fn runtime_options(telemetry: State<'_, TelemetryState>) -> Result<Vec<runtime::RuntimeBuild>, String> {
+    let has_nvidia = !telemetry.snapshot().gpus.is_empty();
+    runtime::options(has_nvidia)
+}
+
+/// Download and unpack a llama.cpp build.
+#[tauri::command]
+fn runtime_install(window: tauri::Window, build: runtime::RuntimeBuild) {
+    runtime::install(window, build);
 }
 
 /// Search Hugging Face for GGUF repos.
@@ -435,6 +455,9 @@ pub fn run() {
             chat_send,
             chat_cancel,
             chat_title,
+            runtime_status,
+            runtime_options,
+            runtime_install,
             hf_search,
             hf_files,
             download_sources,

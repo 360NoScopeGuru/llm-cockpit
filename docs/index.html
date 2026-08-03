@@ -284,12 +284,17 @@
         <span class="ic">&#9881;</span>
         <span class="t">What you also need</span>
         <span class="d">
-          An <b>NVIDIA GPU</b> (telemetry and benchmarking use NVML), and a
-          <code>llama-server</code> binary &mdash; found automatically if LM Studio
-          is installed, otherwise put llama.cpp&rsquo;s on your PATH.
+          An <b>NVIDIA GPU</b> &mdash; telemetry and benchmarking use NVML.
+          That is the only hard requirement.
         </span>
         <span class="d">
-          Models are optional: Tokamak reads your existing Hugging Face,
+          <b>No separate inference runtime to install.</b> On first run Tokamak
+          offers to fetch the right llama.cpp build for your GPU and manages it
+          itself &mdash; and uses LM Studio&rsquo;s binaries automatically if you
+          already have them.
+        </span>
+        <span class="d">
+          Models are optional too: it reads your existing Hugging Face,
           LM Studio and Ollama caches, and can download new ones itself.
         </span>
       </div>
