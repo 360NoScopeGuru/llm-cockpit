@@ -252,7 +252,9 @@ select:focus {
 
 /* ========================= fuel library (left) ===================== */
 
-.library {
+/* Left rail: models on top, saved sessions below. Both scroll independently
+   so a long model list never buries the session list, and vice versa. */
+.rail-left {
   width: 304px;
   flex: none;
   border-right: 1px solid var(--hair);
@@ -262,9 +264,15 @@ select:focus {
   min-height: 0;
 }
 @media (max-width: 1200px) {
-  .library {
+  .rail-left {
     width: 248px;
   }
+}
+.library {
+  flex: 1 1 58%;
+  display: flex;
+  flex-direction: column;
+  min-height: 150px;
 }
 .lib-head {
   padding: 12px 12px 8px;
@@ -286,6 +294,37 @@ select:focus {
   overflow-y: auto;
   border-top: 1px solid var(--hair2);
   min-height: 0;
+}
+
+.sessions {
+  flex: 1 1 42%;
+  display: flex;
+  flex-direction: column;
+  min-height: 132px;
+  border-top: 1px solid var(--hair);
+  background: var(--bg0);
+}
+.sessions-head {
+  padding: 10px 12px 8px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.sessions-count {
+  font: 10.5px var(--mono);
+  color: var(--faint);
+}
+.sessions-scroll {
+  flex: 1;
+  overflow-y: auto;
+  border-top: 1px solid var(--hair2);
+  min-height: 0;
+}
+.sessions-empty {
+  padding: 16px 12px;
+  font: 11px var(--mono);
+  color: var(--low);
+  line-height: 1.6;
 }
 
 .fuel-row {
@@ -447,17 +486,32 @@ select:focus {
   letter-spacing: 0.02em;
   text-transform: none;
 }
+/* Rows sit in the 304px rail, so the kind tag and delete button pin to the
+   edges and everything else wraps inside the middle column. */
 .hist-row {
   display: flex;
-  gap: 12px;
-  align-items: center;
-  padding: 9px 10px;
+  gap: 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--hair3);
   cursor: pointer;
   flex: none;
 }
 .hist-row:hover {
   background: var(--bg2);
+}
+.hist-row.open {
+  background: var(--bg2);
+  box-shadow: inset 2px 0 0 var(--plasma);
+}
+/* Keep the delete button out of the way until the row is under the cursor. */
+.hist-del {
+  opacity: 0;
+  flex: none;
+}
+.hist-row:hover .hist-del,
+.hist-del:focus-visible {
+  opacity: 1;
 }
 .hist-kind {
   font: 600 9.5px var(--mono);
@@ -486,18 +540,21 @@ select:focus {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The detail line is dense (model, ctx, turns, tokens, tok/s) and the rail is
+   narrow, so let it wrap to two lines rather than truncating most of it. */
 .hist-detail {
   font: 10.5px var(--mono);
   color: var(--low);
+  line-height: 1.45;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 .hist-date {
-  font: 10.5px var(--mono);
+  font: 10px var(--mono);
   color: var(--faint);
   white-space: nowrap;
-  flex: none;
 }
 
 .console-model {

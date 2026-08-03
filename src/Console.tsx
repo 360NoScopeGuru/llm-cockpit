@@ -1,4 +1,11 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import {
+  ReactNode,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Markdown } from "./Markdown";
@@ -6,7 +13,6 @@ import {
   InferenceMetrics,
   SamplerSnap,
   ServerStatus,
-  SessionMeta,
   StoredSession,
   StoredTurn,
   baseName,
@@ -21,7 +27,7 @@ import {
 // Each tab is its own session; every completed turn is persisted to
 // <config>/tokamak/sessions/<id>.json with full detail (model, config,
 // sampler settings, per-reply tokens + tok/s, thinking, tool calls,
-// timestamps). The HISTORY panel lists and reopens them.
+// timestamps). The left rail lists and reopens them.
 
 type TabKind = "chat" | "code";
 
@@ -35,6 +41,9 @@ interface Turn {
   tokens?: number;
   decodeTokS?: number;
   stopped?: boolean;
+  /// `undefined` = unknown (e.g. an older saved turn); `null` = the stream
+  /// ended without ever reporting why. These mean different things.
+  finish?: string | null;
   error?: boolean;
   ts?: number;
   sampler?: SamplerSnap;
@@ -102,6 +111,19 @@ interface ConsoleProps {
   kvAlert: boolean;
   workspace: string | null;
   onPickWorkspace: () => void;
+  /// Fired whenever the saved-session set changes, so the rail can refetch.
+  onSessionsChanged: () => void;
+  /// Pushes the state the rail needs to render: which sessions are open, and
+  /// whether a generation is in flight (during which a session cannot be
+  /// swapped in). Pushed rather than pulled through the ref, because a ref read
+  /// during render would not re-render the rail when this changes.
+  onStateChanged: (s: { openIds: string[]; busy: boolean }) => void;
+}
+
+/// Actions the left rail's session list drives on the console.
+export interface ConsoleHandle {
+  loadSession: (id: string) => void;
+  deleteSession: (id: string) => void;
 }
 
 interface ToolCall {
@@ -179,9 +201,9 @@ function metaLine(
     ? " · stopped by you"
     : finish === "length"
       ? cutOff
-      : finish == null
+      : finish === null
         ? " · ⚠ stream ended early"
-        : "";
+        : ""; // undefined = unknown: say nothing rather than cry wolf
   return `${tokens} tok · ${rate.toFixed(1)} tok/s${why}`;
 }
 
@@ -192,7 +214,7 @@ function fmtDate(ms: number): string {
     d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export function Console(p: ConsoleProps) {
+export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(p, ref) {
   const [tab, setTab] = useState<TabKind>("chat");
   const [tabs, setTabs] = useState<Record<TabKind, TabState>>({
     chat: emptyTab(),
@@ -212,8 +234,8 @@ export function Console(p: ConsoleProps) {
   const [copied, setCopied] = useState(false);
   const [pendingTool, setPendingTool] = useState<ToolCall | null>(null);
   const [toolBusy, setToolBusy] = useState(false);
-  const [histOpen, setHistOpen] = useState(false);
-  const [histList, setHistList] = useState<SessionMeta[] | null>(null);
+  // The session list itself lives in the left rail now; the console only needs
+  // to act on it and say when it changed.
 
   const genId = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -264,6 +286,7 @@ export function Console(p: ConsoleProps) {
       tokens: t.tokens ?? null,
       decode_tok_s: t.decodeTokS ?? null,
       stopped: t.stopped ?? null,
+      finish: t.finish ?? null,
       error: t.error ?? null,
       timestamp_ms: t.ts ?? 0,
       sampler: t.sampler ?? null,
@@ -304,7 +327,9 @@ export function Console(p: ConsoleProps) {
       updated_ms: Date.now(),
       turns: turns.map(toStored),
     };
-    invoke("history_save", { session }).catch(() => {});
+    invoke("history_save", { session })
+      .then(() => p.onSessionsChanged())
+      .catch(() => {});
   }
 
   // ---- message assembly + dispatch ----
@@ -527,6 +552,7 @@ export function Console(p: ConsoleProps) {
               tokens: e.payload.tokens,
               decodeTokS: e.payload.decode_tok_s,
               stopped: e.payload.stopped,
+              finish: e.payload.finish,
               meta: e.payload.error
                 ? undefined
                 : metaLine(
@@ -622,16 +648,7 @@ export function Console(p: ConsoleProps) {
     setTimeout(() => setCopied(false), 1200);
   }
 
-  // ---- history panel ----
-
-  async function openHistory() {
-    try {
-      setHistList(await invoke<SessionMeta[]>("history_list"));
-    } catch {
-      setHistList([]);
-    }
-    setHistOpen(true);
-  }
+  // ---- sessions (list rendered by the left rail) ----
 
   async function loadSession(id: string) {
     if (streaming || toolBusy) return;
@@ -647,12 +664,19 @@ export function Console(p: ConsoleProps) {
         tokens: st.tokens ?? undefined,
         decodeTokS: st.decode_tok_s ?? undefined,
         stopped: st.stopped ?? undefined,
+        finish: st.finish,
         error: st.error ?? undefined,
         ts: st.timestamp_ms || undefined,
         sampler: st.sampler ?? undefined,
         meta:
           st.role === "assistant" && st.kind !== "tool-result"
-            ? metaLine(st.tokens, st.decode_tok_s, st.stopped)
+            ? metaLine(
+                st.tokens,
+                st.decode_tok_s,
+                st.stopped,
+                st.finish,
+                st.sampler?.max_tokens ?? null
+              )
             : undefined,
       }));
       setTabs((prev) => ({
@@ -673,10 +697,9 @@ export function Console(p: ConsoleProps) {
         },
       }));
       setTab(kind);
-      setHistOpen(false);
     } catch {
-      /* row disappeared — refresh */
-      openHistory();
+      /* row vanished under us — let the rail resync */
+      p.onSessionsChanged();
     }
   }
 
@@ -693,8 +716,17 @@ export function Console(p: ConsoleProps) {
         patchTab(k, (t) => ({ ...t, id: newSessionId() }));
       }
     });
-    setHistList((prev) => (prev ? prev.filter((m) => m.id !== id) : prev));
+    p.onSessionsChanged();
   }
+
+  useImperativeHandle(ref, () => ({ loadSession, deleteSession }));
+
+  useEffect(() => {
+    p.onStateChanged({
+      openIds: [tabs.chat.id, tabs.code.id].filter((x): x is string => !!x),
+      busy: streaming || toolBusy,
+    });
+  }, [tabs.chat.id, tabs.code.id, streaming, toolBusy]);
 
   const kvTokens = p.metrics?.kv_cache_tokens ?? 0;
   const kvPct = Math.round((p.metrics?.kv_cache_usage_ratio ?? 0) * 100);
@@ -776,54 +808,6 @@ export function Console(p: ConsoleProps) {
     );
   }
 
-  const historyPanel = (
-    <div className="board history-panel">
-      <div className="board-head">
-        <span className="lbl">History</span>
-        <span style={{ font: "10.5px var(--mono)", color: "var(--faint)" }}>
-          {histList?.length ?? 0} saved sessions · every turn, config and measurement kept
-        </span>
-        <span className="spacer" />
-        <button onClick={() => setHistOpen(false)}>✕</button>
-      </div>
-      {(histList ?? []).map((m) => (
-        <div
-          key={m.id}
-          className="hist-row"
-          onClick={() => loadSession(m.id)}
-          title="open this session"
-        >
-          <span className={`hist-kind ${m.kind}`}>{m.kind === "code" ? "CODE" : "CHAT"}</span>
-          <span className="hist-main">
-            <span className="hist-title">{m.title}</span>
-            <span className="hist-detail">
-              {m.model_name ?? "unknown model"}
-              {m.n_gpu_layers != null ? ` · ${m.n_gpu_layers}L` : ""}
-              {m.ctx_size ? ` · ${ctxLabel(m.ctx_size)} ctx` : ""}
-              {m.workspace ? ` · ⌂ ${baseName(m.workspace)}` : ""}
-              {` · ${m.turn_count} turns`}
-              {m.total_tokens > 0 ? ` · ${m.total_tokens.toLocaleString()} tok` : ""}
-              {m.avg_decode_tok_s > 0 ? ` · ${m.avg_decode_tok_s.toFixed(1)} tok/s avg` : ""}
-            </span>
-          </span>
-          <span className="hist-date">{fmtDate(m.updated_ms)}</span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              deleteSession(m.id);
-            }}
-            title="delete forever"
-          >
-            ✕
-          </button>
-        </div>
-      ))}
-      {histList && histList.length === 0 && (
-        <div className="transcript-empty">No saved sessions yet — they appear here automatically as you chat.</div>
-      )}
-    </div>
-  );
-
   return (
     <div className="console">
       <div className="console-head">
@@ -843,9 +827,6 @@ export function Console(p: ConsoleProps) {
             ⌂ {p.workspace ? baseName(p.workspace) : "pick workspace"}
           </button>
         )}
-        <button onClick={openHistory} title="browse saved sessions">
-          History
-        </button>
         {server?.base_url ? (
           <span
             className="api-chip"
@@ -886,8 +867,6 @@ export function Console(p: ConsoleProps) {
 
       {p.board ? (
         p.board
-      ) : histOpen ? (
-        historyPanel
       ) : fault ? (
         <div className="console-state">
           <div className="state-box" style={{ maxWidth: 680 }}>
@@ -927,7 +906,9 @@ export function Console(p: ConsoleProps) {
             </div>
           </div>
         </div>
-      ) : ready ? (
+      ) : ready || cur.turns.length > 0 ? (
+        // Turns render even with no model loaded: reopening a saved session
+        // from the rail must be readable without igniting something first.
         <div className="transcript" ref={scrollRef}>
           {cur.turns.length === 0 && (
             <div className="transcript-empty">
@@ -1003,7 +984,7 @@ export function Console(p: ConsoleProps) {
         </div>
       )}
 
-      {!p.board && !histOpen && ready && ctxSize && (cur.turns.length > 0 || kvTokens > 0) && (
+      {!p.board && ready && ctxSize && (cur.turns.length > 0 || kvTokens > 0) && (
         <div className="timeline">
           <div className="timeline-track">
             {cur.turns.map((t, i) => {
@@ -1035,7 +1016,7 @@ export function Console(p: ConsoleProps) {
         </div>
       )}
 
-      {!p.board && !histOpen && (
+      {!p.board && (
         <>
           <div className="sampler-row">
             {sampler("temp", temp, setTemp)}
@@ -1083,4 +1064,4 @@ export function Console(p: ConsoleProps) {
       )}
     </div>
   );
-}
+});

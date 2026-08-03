@@ -44,6 +44,11 @@ pub struct StoredTurn {
     pub decode_tok_s: Option<f64>,
     #[serde(default)]
     pub stopped: Option<bool>,
+    /// The stream's `finish_reason` ("stop" / "length"). `None` means either an
+    /// interrupted stream or a session saved before this was recorded — the UI
+    /// must not treat absence as evidence of truncation.
+    #[serde(default)]
+    pub finish: Option<String>,
     #[serde(default)]
     pub error: Option<bool>,
     #[serde(default)]
@@ -218,6 +223,7 @@ mod tests {
                 tokens: Some(2),
                 decode_tok_s: None,
                 stopped: None,
+                finish: None,
                 error: None,
                 timestamp_ms: 1,
                 sampler: None,

@@ -178,6 +178,9 @@ export interface StoredTurn {
   tokens?: number | null;
   decode_tok_s?: number | null;
   stopped?: boolean | null;
+  /// finish_reason as recorded at generation time. Absent on turns saved before
+  /// this was tracked — absence is "unknown", never "was truncated".
+  finish?: string | null;
   error?: boolean | null;
   timestamp_ms: number;
   sampler?: SamplerSnap | null;
