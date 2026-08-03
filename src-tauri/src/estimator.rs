@@ -24,6 +24,11 @@ const OVERHEAD_BYTES: u64 = 400 * 1024 * 1024;
 /// f16 KV cache: 2 bytes per element (the llama.cpp default).
 const KV_ELEM_BYTES: u64 = 2;
 
+/// Context to aim for when a model cannot be fully offloaded. Below this,
+/// agent runs and long documents fill the window mid-task; the layers traded
+/// away to reach it are the cheaper loss.
+const TARGET_PARTIAL_CTX: u64 = 8192;
+
 /// Candidate context sizes to consider, filtered to the model's native max.
 const CANDIDATE_CTX: &[u32] = &[
     2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
@@ -45,7 +50,13 @@ pub struct ModelShape {
 pub struct ContextOption {
     pub ctx: u32,
     pub est_total_bytes: u64,
+    /// True when every layer fits on the GPU at this context.
     pub fits: bool,
+    /// Layers that actually fit at this context. A rung with `fits: false` but
+    /// a non-zero count is still perfectly usable — just partially offloaded.
+    /// Reporting only `fits` made the whole ladder read as unusable on models
+    /// that were running fine at partial offload.
+    pub n_gpu_layers: u32,
 }
 
 /// One quant level evaluated by the advisor.
@@ -261,6 +272,16 @@ fn kv_bytes(shape: &ModelShape, ctx: u64, layers_on_gpu: u64) -> u64 {
         .saturating_mul(KV_ELEM_BYTES)
 }
 
+/// Most layers that fit on the GPU at a given context, 0 if none do.
+fn max_layers_at(shape: &ModelShape, ctx: u64, budget: u64) -> u64 {
+    for n in (0..=shape.n_layers).rev() {
+        if weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n) <= budget {
+            return n;
+        }
+    }
+    0
+}
+
 fn weights_bytes(shape: &ModelShape, layers_on_gpu: u64) -> u64 {
     if shape.n_layers == 0 {
         return 0;
@@ -282,7 +303,9 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         .into_iter()
         .collect();
 
-    // Full-offload feasibility per candidate context.
+    // Per candidate context: does it fit fully, and if not, how many layers do
+    // fit? Both numbers matter — a model that cannot fully offload is still
+    // usable, and the largest usable context is usually a partial-offload one.
     let weights_full = weights_bytes(shape, shape.n_layers);
     let context_options: Vec<ContextOption> = candidates
         .iter()
@@ -293,6 +316,8 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
                 ctx,
                 est_total_bytes: total,
                 fits: total <= budget,
+                n_gpu_layers: max_layers_at(shape, ctx as u64, budget)
+                    .min(u32::MAX as u64) as u32,
             }
         })
         .collect();
@@ -318,16 +343,18 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         };
     }
 
-    // Can't fully offload — pick a modest context and maximize offloaded layers.
-    let ctx = 4096u64.min(shape.native_ctx);
-    let mut best_layers = 0u64;
-    for n in (0..=shape.n_layers).rev() {
-        let total = weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n);
-        if total <= budget {
-            best_layers = n;
-            break;
-        }
-    }
+    // Can't fully offload. Aim for a context that is actually usable rather
+    // than the smallest one that works: 4K is below what agent or long-document
+    // work needs, and the layers given up to reach 8K cost far less than
+    // running out of context mid-task. Step down only if the target won't fit.
+    let target = TARGET_PARTIAL_CTX.min(shape.native_ctx);
+    let (ctx, best_layers) = [target, 4096, 2048]
+        .into_iter()
+        .map(|c| c.min(shape.native_ctx))
+        .filter(|&c| c > 0)
+        .map(|c| (c, max_layers_at(shape, c, budget)))
+        .find(|&(_, layers)| layers > 0)
+        .unwrap_or((4096u64.min(shape.native_ctx).max(1), 0));
 
     if best_layers == 0 {
         notes.push("model won't fit in VRAM even partially; will run on CPU".into());
@@ -336,6 +363,13 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
             "partial offload: {best_layers}/{} layers fit at {ctx} ctx",
             shape.n_layers
         ));
+        if best_layers < shape.n_layers {
+            notes.push(
+                "more context is available lower down the ladder — each rung trades \
+                 GPU layers (speed) for context length"
+                    .into(),
+            );
+        }
     }
 
     let weights = weights_bytes(shape, best_layers);
@@ -531,5 +565,60 @@ mod tests {
                 println!("     note: {n}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod ladder {
+    use super::*;
+
+    fn shape(file_size: u64, n_layers: u64) -> ModelShape {
+        ModelShape {
+            file_size,
+            n_layers,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 262_144,
+        }
+    }
+
+    /// A model too big to fully offload is still perfectly usable. The ladder
+    /// used to report only full-offload feasibility, so every rung read as
+    /// unusable on exactly the models people run at partial offload.
+    #[test]
+    fn partial_rungs_report_usable_layers() {
+        // 27B Q4_K_M on a 17.1 GB card: never fully offloads.
+        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, vec![]);
+        assert!(!est.full_offload);
+        assert!(est.context_options.iter().all(|o| !o.fits));
+        // ...yet every rung up to a large context still runs partially.
+        for o in est.context_options.iter().filter(|o| o.ctx <= 32_768) {
+            assert!(o.n_gpu_layers > 0, "{}K should be usable", o.ctx / 1024);
+        }
+        // Bigger context costs layers — the tradeoff must be monotonic.
+        let layers_at = |c: u32| {
+            est.context_options.iter().find(|o| o.ctx == c).unwrap().n_gpu_layers
+        };
+        assert!(layers_at(4096) > layers_at(8192));
+        assert!(layers_at(8192) > layers_at(16384));
+    }
+
+    /// The partial path used to hardcode 4096, so a big model on a big card
+    /// always landed at 4K however much room a few fewer layers would buy.
+    #[test]
+    fn partial_offload_targets_a_usable_context() {
+        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, vec![]);
+        assert_eq!(est.ctx_size, 8192);
+        assert!(est.n_gpu_layers > 0 && est.n_gpu_layers < 64);
+    }
+
+    /// A model that fits comfortably should still prefer full offload at the
+    /// largest context, not get dragged down by the partial-path target.
+    #[test]
+    fn small_model_still_fully_offloads_at_a_large_context() {
+        let est = estimate(&shape(4_700_000_000, 28), 17_100_000_000, 17_100_000_000, vec![]);
+        assert!(est.full_offload);
+        assert!(est.ctx_size >= 32_768, "got {}", est.ctx_size);
     }
 }

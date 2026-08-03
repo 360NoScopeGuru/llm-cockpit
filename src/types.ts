@@ -19,6 +19,9 @@ export interface ModelEntry {
   file_name: string;
   size_bytes: number;
   source: string;
+  /// Set for Ollama models, whose on-disk name is a content hash — this is the
+  /// `name:tag` to show instead.
+  display_name: string | null;
   is_shard_continuation: boolean;
   shard_total: number | null;
   is_mmproj: boolean;
@@ -81,7 +84,11 @@ export interface ServerStatus {
 export interface ContextOption {
   ctx: number;
   est_total_bytes: number;
+  /// All layers fit on the GPU at this context.
   fits: boolean;
+  /// Layers that fit at this context — non-zero rungs are usable even when
+  /// `fits` is false (partial offload).
+  n_gpu_layers: number;
 }
 
 export interface QuantOption {
@@ -175,6 +182,9 @@ export interface StoredTurn {
   tokens?: number | null;
   decode_tok_s?: number | null;
   stopped?: boolean | null;
+  /// finish_reason as recorded at generation time. Absent on turns saved before
+  /// this was tracked — absence is "unknown", never "was truncated".
+  finish?: string | null;
   error?: boolean | null;
   timestamp_ms: number;
   sampler?: SamplerSnap | null;
@@ -231,5 +241,8 @@ export function dirOf(path: string): string {
 }
 
 export function modelLabel(m: ModelEntry): string {
+  // Ollama models are shown by their `name:tag` so the library matches what
+  // `ollama list` says; the GGUF's internal name would not.
+  if (m.display_name) return m.display_name;
   return (m.metadata?.name ?? m.file_name).replace(/\.gguf$/i, "");
 }

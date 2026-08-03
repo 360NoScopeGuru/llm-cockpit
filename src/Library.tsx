@@ -46,6 +46,7 @@ function verdict(est: VramEstimate | undefined, layers: number | null) {
 function srcShort(r: ScanRoot): string {
   if (r.source === "huggingface") return "HF";
   if (r.source === "lm-studio") return "LM Studio";
+  if (r.source === "ollama") return "Ollama";
   const parts = r.path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? r.path;
 }
@@ -108,6 +109,7 @@ export function Library(p: LibraryProps) {
                 <span className="chip">{md?.quant_label ?? "?"}</span>
                 <span>{gb(m.size_bytes)} GB</span>
                 <span>{ctxLabel(md?.context_length ?? null)}</span>
+                {m.source === "ollama" && <span className="chip">OLLAMA</span>}
                 {p.visionDirs.has(dirKey(m.path)) && <span className="chip vision">VISION</span>}
                 {m.shard_total && <span className="chip">×{m.shard_total}</span>}
                 {live && <span className="chip running">▶ RUNNING</span>}

@@ -26,8 +26,11 @@ pub struct ModelEntry {
     pub path: String,
     pub file_name: String,
     pub size_bytes: u64,
-    /// Origin: "huggingface" | "lm-studio" | "folder".
+    /// Origin: "huggingface" | "lm-studio" | "ollama" | "folder".
     pub source: String,
+    /// Ollama stores weights as extensionless content-addressed blobs, so the
+    /// file name is a hash. This carries the `name:tag` to show instead.
+    pub display_name: Option<String>,
     /// True for shard 2..N of a split model — hidden from the primary list.
     pub is_shard_continuation: bool,
     pub shard_total: Option<u32>,
@@ -82,15 +85,25 @@ fn dedupe_roots(roots: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
 }
 
 /// Report the default roots and whether each currently exists (for the UI).
+/// The Ollama store is listed here even though it is not walked like the
+/// others — it is read via manifests in `scan_models`.
 pub fn default_roots_info() -> Vec<ScanRoot> {
-    default_roots()
+    let mut roots: Vec<ScanRoot> = default_roots()
         .into_iter()
         .map(|(path, source)| ScanRoot {
             exists: path.is_dir(),
             path: path.to_string_lossy().into_owned(),
             source,
         })
-        .collect()
+        .collect();
+    if let Some(o) = crate::ollama::models_root() {
+        roots.push(ScanRoot {
+            exists: o.is_dir(),
+            path: o.to_string_lossy().into_owned(),
+            source: "ollama".into(),
+        });
+    }
+    roots
 }
 
 /// Scan the default roots plus any `extra_dirs` (labeled "folder") for GGUF models.
@@ -124,6 +137,24 @@ pub fn scan_models(extra_dirs: &[String]) -> Vec<ModelEntry> {
         }
     }
 
+    // Ollama's store is content-addressed, so it needs manifest lookups rather
+    // than a file walk. Skip any blob already reached through another root.
+    for m in crate::ollama::discover() {
+        let key = m
+            .blob_path
+            .canonicalize()
+            .unwrap_or_else(|_| m.blob_path.clone());
+        if seen_paths.iter().any(|p| p == &key) {
+            continue;
+        }
+        seen_paths.push(key);
+        let mut entry = build_entry(&m.blob_path, "ollama");
+        entry.file_name = m.name.clone();
+        entry.display_name = Some(m.name);
+        entry.size_bytes = m.size_bytes;
+        entries.push(entry);
+    }
+
     entries.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
     entries
 }
@@ -152,6 +183,7 @@ fn build_entry(path: &Path, source: &str) -> ModelEntry {
         file_name,
         size_bytes,
         source: source.to_string(),
+        display_name: None,
         is_shard_continuation: shard.map(|(i, _)| i > 1).unwrap_or(false),
         shard_total: shard.map(|(_, t)| t),
         is_mmproj,

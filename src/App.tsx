@@ -7,7 +7,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { Library } from "./Library";
 import { Rail, Ghost } from "./Rail";
 import { Dock } from "./Dock";
-import { Console, StagedIgnite } from "./Console";
+import { Console, ConsoleHandle, StagedIgnite } from "./Console";
+import { Sessions } from "./Sessions";
 import { FluxSample } from "./Flux";
 import {
   BenchResult,
@@ -16,6 +17,7 @@ import {
   ModelEntry,
   ScanRoot,
   ServerStatus,
+  SessionMeta,
   Settings,
   SuiteRow,
   TelemetrySnapshot,
@@ -40,6 +42,14 @@ export default function App() {
   const [server, setServer] = useState<ServerStatus | null>(null);
   const [estimates, setEstimates] = useState<Map<string, VramEstimate>>(new Map());
   const [hoverPath, setHoverPath] = useState<string | null>(null);
+  // Saved sessions live in the left rail beneath the model list. The console
+  // owns the transcripts; the rail only lists them and asks it to open one.
+  const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
+  const [consoleState, setConsoleState] = useState<{ openIds: string[]; busy: boolean }>({
+    openIds: [],
+    busy: false,
+  });
+  const consoleRef = useRef<ConsoleHandle>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
   const [liveCfg, setLiveCfg] = useState<{ ngl: number; ctx: number } | null>(null);
@@ -237,6 +247,18 @@ export default function App() {
   }, []);
 
   // ---- launch / stop ----
+
+  async function refreshSessions() {
+    try {
+      setSessions(await invoke<SessionMeta[]>("history_list"));
+    } catch {
+      setSessions([]);
+    }
+  }
+
+  useEffect(() => {
+    refreshSessions();
+  }, []);
 
   async function ignite(m: ModelEntry, ngl?: number, ctx?: number) {
     setLaunching(true);
@@ -567,6 +589,7 @@ export default function App() {
       </header>
 
       <div className="deck">
+        <div className="rail-left">
         <Library
           models={primary}
           visionDirs={visionDirs}
@@ -586,9 +609,20 @@ export default function App() {
           onAddFolder={addFolder}
           onRemoveFolder={removeFolder}
         />
+          <Sessions
+            sessions={sessions}
+            openIds={consoleState.openIds}
+            busy={consoleState.busy}
+            onOpen={(id) => consoleRef.current?.loadSession(id)}
+            onDelete={(id) => consoleRef.current?.deleteSession(id)}
+          />
+        </div>
 
         <div className="center">
           <Console
+            ref={consoleRef}
+            onSessionsChanged={refreshSessions}
+            onStateChanged={setConsoleState}
             server={server}
             metrics={metrics}
             liveCfg={liveCfg}

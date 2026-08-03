@@ -1,4 +1,11 @@
-import { ReactNode, useEffect, useRef, useState } from "react";
+import {
+  ReactNode,
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Markdown } from "./Markdown";
@@ -6,7 +13,6 @@ import {
   InferenceMetrics,
   SamplerSnap,
   ServerStatus,
-  SessionMeta,
   StoredSession,
   StoredTurn,
   baseName,
@@ -21,13 +27,13 @@ import {
 // Each tab is its own session; every completed turn is persisted to
 // <config>/tokamak/sessions/<id>.json with full detail (model, config,
 // sampler settings, per-reply tokens + tok/s, thinking, tool calls,
-// timestamps). The HISTORY panel lists and reopens them.
+// timestamps). The left rail lists and reopens them.
 
 type TabKind = "chat" | "code";
 
 interface Turn {
   role: "user" | "assistant";
-  kind?: "chat" | "tool-result";
+  kind?: "chat" | "tool-result" | "continue";
   toolName?: string;
   content: string;
   thinking?: string;
@@ -35,6 +41,9 @@ interface Turn {
   tokens?: number;
   decodeTokS?: number;
   stopped?: boolean;
+  /// `undefined` = unknown (e.g. an older saved turn); `null` = the stream
+  /// ended without ever reporting why. These mean different things.
+  finish?: string | null;
   error?: boolean;
   ts?: number;
   sampler?: SamplerSnap;
@@ -102,6 +111,19 @@ interface ConsoleProps {
   kvAlert: boolean;
   workspace: string | null;
   onPickWorkspace: () => void;
+  /// Fired whenever the saved-session set changes, so the rail can refetch.
+  onSessionsChanged: () => void;
+  /// Pushes the state the rail needs to render: which sessions are open, and
+  /// whether a generation is in flight (during which a session cannot be
+  /// swapped in). Pushed rather than pulled through the ref, because a ref read
+  /// during render would not re-render the rail when this changes.
+  onStateChanged: (s: { openIds: string[]; busy: boolean }) => void;
+}
+
+/// Actions the left rail's session list drives on the console.
+export interface ConsoleHandle {
+  loadSession: (id: string) => void;
+  deleteSession: (id: string) => void;
 }
 
 interface ToolCall {
@@ -111,6 +133,11 @@ interface ToolCall {
 
 const TOOL_NAMES = new Set(["list_dir", "read_file", "write_file", "run_command"]);
 const MAX_TOOL_ROUNDS = 24;
+/// Consecutive "you stopped early, keep going" nudges before handing control
+/// back. Capped separately from tool rounds and much lower: a tool round makes
+/// visible progress, a nudge might not, and each one costs a full generation.
+/// Reset as soon as the agent does something real.
+const MAX_NUDGES = 3;
 
 const estTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
 
@@ -134,7 +161,23 @@ Rules:
 - Paths are relative to the workspace; you cannot access anything outside it.
 - Make at most ONE tool call per reply. After the tool block, stop and wait — the result arrives in the next message tagged [tool result].
 - Work step by step: inspect before you edit, verify after you change.
-- When the task is done (or no tool is needed), reply normally with no tool block.`;
+
+NEVER paste file contents into your reply. Writing code in chat produces
+nothing on disk, burns the context window, and the work is lost. To create or
+change a file you MUST use write_file. A reply that describes code without a
+write_file block has accomplished nothing.
+
+Keep going until the task is actually finished. Do not stop after planning,
+after describing what you will do, or after one file when more are needed.
+End EVERY reply one of exactly two ways:
+  1. a \`\`\`tool block — you are continuing, or
+  2. the single line TASK COMPLETE — everything is written and verified.
+If you end any other way you will be asked to continue.`;
+
+/// The agent's explicit end-of-work marker. Without one, a reply that merely
+/// stops is indistinguishable from a reply that finished — which is how the
+/// agent used to quit halfway through and look like it had crashed.
+const DONE_MARKER = /^\s*(TASK COMPLETE|\*\*TASK COMPLETE\*\*)\s*\.?\s*$/im;
 
 function parseToolCall(content: string): ToolCall | null {
   const matches = [...content.matchAll(/```tool\s*\n?([\s\S]*?)```/g)];
@@ -152,22 +195,36 @@ function stripToolBlock(content: string): string {
   return content.replace(/```tool\s*\n?[\s\S]*?```\s*$/, "").trimEnd();
 }
 
+/// Blank, 0 or negative all mean "no cap": the field is omitted from the
+/// request so the server falls back to its own n_predict = -1 (unlimited).
+function capOf(v: string): number | null {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function metaLine(
   tokens?: number | null,
   rate?: number | null,
   stopped?: boolean | null,
-  finish?: string | null
+  finish?: string | null,
+  /// The max-tokens cap in force for this turn, or null when it was unlimited.
+  cap?: number | null
 ) {
   if (tokens == null || rate == null) return undefined;
-  // An answer that ends early must say so. Silence here is what made
-  // truncation feel like a random bug rather than a limit being hit.
+  // `finish: "length"` covers two different causes and the fix differs, so
+  // name the actual one. Telling someone to "raise max" when max is already ∞
+  // sends them to a setting that cannot help.
+  const cutOff =
+    cap != null
+      ? ` · ⚠ CUT OFF at the ${cap} token max — raise max`
+      : " · ⚠ CUT OFF — context window full, not a token cap";
   const why = stopped
     ? " · stopped by you"
     : finish === "length"
-      ? " · ⚠ CUT OFF — raise max, or the context is full"
-      : finish == null
+      ? cutOff
+      : finish === null
         ? " · ⚠ stream ended early"
-        : "";
+        : ""; // undefined = unknown: say nothing rather than cry wolf
   return `${tokens} tok · ${rate.toFixed(1)} tok/s${why}`;
 }
 
@@ -178,7 +235,7 @@ function fmtDate(ms: number): string {
     d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export function Console(p: ConsoleProps) {
+export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(p, ref) {
   const [tab, setTab] = useState<TabKind>("chat");
   const [tabs, setTabs] = useState<Record<TabKind, TabState>>({
     chat: emptyTab(),
@@ -198,8 +255,8 @@ export function Console(p: ConsoleProps) {
   const [copied, setCopied] = useState(false);
   const [pendingTool, setPendingTool] = useState<ToolCall | null>(null);
   const [toolBusy, setToolBusy] = useState(false);
-  const [histOpen, setHistOpen] = useState(false);
-  const [histList, setHistList] = useState<SessionMeta[] | null>(null);
+  // The session list itself lives in the left rail now; the console only needs
+  // to act on it and say when it changed.
 
   const genId = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -212,6 +269,7 @@ export function Console(p: ConsoleProps) {
   const cfgRef = useRef<{ ngl: number; ctx: number } | null>(null);
   const modelNameRef = useRef<string | null>(null);
   const roundsRef = useRef(0);
+  const nudgesRef = useRef(0);
 
   tabsRef.current = tabs;
   wsRef.current = p.workspace;
@@ -227,6 +285,16 @@ export function Console(p: ConsoleProps) {
   const igniting = !!server?.running && (health === "starting" || health === "loading");
   const fault = !!server?.error && !ready && !igniting;
   const cur = tabs[tab];
+  const lastTurn = cur.turns[cur.turns.length - 1];
+  const canContinue =
+    ready &&
+    !streaming &&
+    !toolBusy &&
+    !pendingTool &&
+    !!lastTurn &&
+    lastTurn.role === "assistant" &&
+    !lastTurn.error &&
+    !!lastTurn.content;
 
   // ---- per-tab state helpers ----
 
@@ -243,13 +311,14 @@ export function Console(p: ConsoleProps) {
   function toStored(t: Turn): StoredTurn {
     return {
       role: t.role,
-      kind: t.kind === "tool-result" ? "tool-result" : null,
+      kind: t.kind === "tool-result" || t.kind === "continue" ? t.kind : null,
       tool_name: t.toolName ?? null,
       content: t.content,
       thinking: t.thinking ?? null,
       tokens: t.tokens ?? null,
       decode_tok_s: t.decodeTokS ?? null,
       stopped: t.stopped ?? null,
+      finish: t.finish ?? null,
       error: t.error ?? null,
       timestamp_ms: t.ts ?? 0,
       sampler: t.sampler ?? null,
@@ -290,7 +359,9 @@ export function Console(p: ConsoleProps) {
       updated_ms: Date.now(),
       turns: turns.map(toStored),
     };
-    invoke("history_save", { session }).catch(() => {});
+    invoke("history_save", { session })
+      .then(() => p.onSessionsChanged())
+      .catch(() => {});
   }
 
   // ---- message assembly + dispatch ----
@@ -326,12 +397,6 @@ export function Console(p: ConsoleProps) {
       const n = parseInt(v, 10);
       return Number.isFinite(n) ? n : undefined;
     };
-    // Blank, 0 or a negative all mean "no cap" — omit the field entirely so the
-    // server falls back to n_predict = -1 rather than being handed a limit.
-    const cap = (v: string) => {
-      const n = parseInt(v, 10);
-      return Number.isFinite(n) && n > 0 ? n : undefined;
-    };
     try {
       await invoke("chat_send", {
         id,
@@ -341,7 +406,7 @@ export function Console(p: ConsoleProps) {
           top_k: int(s.topK),
           top_p: num(s.topP),
           min_p: num(s.minP),
-          max_tokens: cap(s.maxTok),
+          max_tokens: capOf(s.maxTok) ?? undefined,
         },
       });
     } catch (e) {
@@ -448,7 +513,42 @@ export function Console(p: ConsoleProps) {
     if (!last || last.role !== "assistant" || last.error || !last.content) return;
     const call = parseToolCall(last.content);
     if (!call) {
-      roundsRef.current = 0;
+      // No tool block. Either the agent is genuinely done, or it stopped
+      // mid-task — which llama.cpp reports as an ordinary EOS (truncated = 0),
+      // so nothing downstream can tell the difference. Treat only the explicit
+      // marker as done and nudge otherwise, instead of silently giving up.
+      if (DONE_MARKER.test(last.content) || last.stopped) {
+        roundsRef.current = 0;
+        nudgesRef.current = 0;
+        return;
+      }
+      if (nudgesRef.current >= MAX_NUDGES || roundsRef.current >= MAX_TOOL_ROUNDS) {
+        nudgesRef.current = 0;
+        roundsRef.current = 0;
+        patchTurns("code", (prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              `⚠ the model kept stopping early (${MAX_NUDGES} nudges). It may be ` +
+              `out of its depth on this task — press ▸ Continue to push on, or ` +
+              `give it a smaller step.`,
+            error: true,
+            ts: Date.now(),
+          },
+        ]);
+        return;
+      }
+      nudgesRef.current += 1;
+      continueWith({
+        role: "user",
+        kind: "continue",
+        content:
+          "You stopped without finishing. Continue from exactly where you left off. " +
+          "Use write_file to put code on disk — do not paste it here. " +
+          "End with a tool block, or with TASK COMPLETE if everything is written.",
+        ts: Date.now(),
+      });
       return;
     }
     if (roundsRef.current >= MAX_TOOL_ROUNDS) {
@@ -462,8 +562,11 @@ export function Console(p: ConsoleProps) {
         },
       ]);
       roundsRef.current = 0;
+      nudgesRef.current = 0;
       return;
     }
+    // A real tool call is progress — forgive any earlier stalls.
+    nudgesRef.current = 0;
     roundsRef.current += 1;
     if (call.tool === "list_dir" || call.tool === "read_file") {
       execTool(call);
@@ -519,13 +622,15 @@ export function Console(p: ConsoleProps) {
               tokens: e.payload.tokens,
               decodeTokS: e.payload.decode_tok_s,
               stopped: e.payload.stopped,
+              finish: e.payload.finish,
               meta: e.payload.error
                 ? undefined
                 : metaLine(
                     e.payload.tokens,
                     e.payload.decode_tok_s,
                     e.payload.stopped,
-                    e.payload.finish
+                    e.payload.finish,
+                    capOf(samplerRef.current.maxTok)
                   ),
             };
           }
@@ -552,6 +657,28 @@ export function Console(p: ConsoleProps) {
 
   // ---- actions ----
 
+  /// Resume a reply the model ended on its own. A model that emits EOS early
+  /// is indistinguishable from one that finished, so this is a manual escape
+  /// hatch for both tabs — the CODE tab also nudges itself automatically.
+  function continueGen() {
+    const k = tab;
+    if (!ready || streaming || toolBusy || pendingTool) return;
+    const next: Turn[] = [
+      ...tabsRef.current[k].turns,
+      {
+        role: "user",
+        kind: "continue",
+        content:
+          "Continue from exactly where you left off. Do not restart or repeat " +
+          "what you already wrote.",
+        ts: Date.now(),
+      },
+      { role: "assistant", content: "", ts: Date.now() },
+    ];
+    patchTab(k, (t) => ({ ...t, turns: next }));
+    dispatch(k, next);
+  }
+
   async function send() {
     const k = tab;
     const t = tabs[k];
@@ -562,6 +689,7 @@ export function Console(p: ConsoleProps) {
       return;
     }
     roundsRef.current = 0;
+    nudgesRef.current = 0;
     const s = samplerRef.current;
     const snap: SamplerSnap = {
       temperature: parseFloat(s.temp) || null,
@@ -594,6 +722,7 @@ export function Console(p: ConsoleProps) {
       /* ignore */
     }
     roundsRef.current = 0;
+    nudgesRef.current = 0;
     setPendingTool(null);
   }
 
@@ -603,6 +732,7 @@ export function Console(p: ConsoleProps) {
     if (tab === "code") {
       setPendingTool(null);
       roundsRef.current = 0;
+      nudgesRef.current = 0;
     }
   }
 
@@ -613,16 +743,7 @@ export function Console(p: ConsoleProps) {
     setTimeout(() => setCopied(false), 1200);
   }
 
-  // ---- history panel ----
-
-  async function openHistory() {
-    try {
-      setHistList(await invoke<SessionMeta[]>("history_list"));
-    } catch {
-      setHistList([]);
-    }
-    setHistOpen(true);
-  }
+  // ---- sessions (list rendered by the left rail) ----
 
   async function loadSession(id: string) {
     if (streaming || toolBusy) return;
@@ -631,19 +752,29 @@ export function Console(p: ConsoleProps) {
       const kind: TabKind = s.kind === "code" ? "code" : "chat";
       const turns: Turn[] = s.turns.map((st) => ({
         role: st.role === "user" ? "user" : "assistant",
-        kind: st.kind === "tool-result" ? "tool-result" : undefined,
+        kind:
+          st.kind === "tool-result" || st.kind === "continue"
+            ? (st.kind as "tool-result" | "continue")
+            : undefined,
         toolName: st.tool_name ?? undefined,
         content: st.content,
         thinking: st.thinking ?? undefined,
         tokens: st.tokens ?? undefined,
         decodeTokS: st.decode_tok_s ?? undefined,
         stopped: st.stopped ?? undefined,
+        finish: st.finish,
         error: st.error ?? undefined,
         ts: st.timestamp_ms || undefined,
         sampler: st.sampler ?? undefined,
         meta:
           st.role === "assistant" && st.kind !== "tool-result"
-            ? metaLine(st.tokens, st.decode_tok_s, st.stopped)
+            ? metaLine(
+                st.tokens,
+                st.decode_tok_s,
+                st.stopped,
+                st.finish,
+                st.sampler?.max_tokens ?? null
+              )
             : undefined,
       }));
       setTabs((prev) => ({
@@ -664,10 +795,9 @@ export function Console(p: ConsoleProps) {
         },
       }));
       setTab(kind);
-      setHistOpen(false);
     } catch {
-      /* row disappeared — refresh */
-      openHistory();
+      /* row vanished under us — let the rail resync */
+      p.onSessionsChanged();
     }
   }
 
@@ -684,8 +814,17 @@ export function Console(p: ConsoleProps) {
         patchTab(k, (t) => ({ ...t, id: newSessionId() }));
       }
     });
-    setHistList((prev) => (prev ? prev.filter((m) => m.id !== id) : prev));
+    p.onSessionsChanged();
   }
+
+  useImperativeHandle(ref, () => ({ loadSession, deleteSession }));
+
+  useEffect(() => {
+    p.onStateChanged({
+      openIds: [tabs.chat.id, tabs.code.id].filter((x): x is string => !!x),
+      busy: streaming || toolBusy,
+    });
+  }, [tabs.chat.id, tabs.code.id, streaming, toolBusy]);
 
   const kvTokens = p.metrics?.kv_cache_tokens ?? 0;
   const kvPct = Math.round((p.metrics?.kv_cache_usage_ratio ?? 0) * 100);
@@ -715,6 +854,15 @@ export function Console(p: ConsoleProps) {
   function renderTurn(t: Turn, i: number, all: Turn[]) {
     const isLast = i === all.length - 1;
     const mine = streamTab.current === tab;
+    if (t.kind === "continue") {
+      // Shown as a thin marker rather than a full user turn — it is bookkeeping,
+      // not something the user said.
+      return (
+        <div key={i} className="continue-mark">
+          ▸ continued — the model had stopped early
+        </div>
+      );
+    }
     if (t.kind === "tool-result") {
       return (
         <details key={i} className="tool-card result">
@@ -767,54 +915,6 @@ export function Console(p: ConsoleProps) {
     );
   }
 
-  const historyPanel = (
-    <div className="board history-panel">
-      <div className="board-head">
-        <span className="lbl">History</span>
-        <span style={{ font: "10.5px var(--mono)", color: "var(--faint)" }}>
-          {histList?.length ?? 0} saved sessions · every turn, config and measurement kept
-        </span>
-        <span className="spacer" />
-        <button onClick={() => setHistOpen(false)}>✕</button>
-      </div>
-      {(histList ?? []).map((m) => (
-        <div
-          key={m.id}
-          className="hist-row"
-          onClick={() => loadSession(m.id)}
-          title="open this session"
-        >
-          <span className={`hist-kind ${m.kind}`}>{m.kind === "code" ? "CODE" : "CHAT"}</span>
-          <span className="hist-main">
-            <span className="hist-title">{m.title}</span>
-            <span className="hist-detail">
-              {m.model_name ?? "unknown model"}
-              {m.n_gpu_layers != null ? ` · ${m.n_gpu_layers}L` : ""}
-              {m.ctx_size ? ` · ${ctxLabel(m.ctx_size)} ctx` : ""}
-              {m.workspace ? ` · ⌂ ${baseName(m.workspace)}` : ""}
-              {` · ${m.turn_count} turns`}
-              {m.total_tokens > 0 ? ` · ${m.total_tokens.toLocaleString()} tok` : ""}
-              {m.avg_decode_tok_s > 0 ? ` · ${m.avg_decode_tok_s.toFixed(1)} tok/s avg` : ""}
-            </span>
-          </span>
-          <span className="hist-date">{fmtDate(m.updated_ms)}</span>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              deleteSession(m.id);
-            }}
-            title="delete forever"
-          >
-            ✕
-          </button>
-        </div>
-      ))}
-      {histList && histList.length === 0 && (
-        <div className="transcript-empty">No saved sessions yet — they appear here automatically as you chat.</div>
-      )}
-    </div>
-  );
-
   return (
     <div className="console">
       <div className="console-head">
@@ -834,9 +934,6 @@ export function Console(p: ConsoleProps) {
             ⌂ {p.workspace ? baseName(p.workspace) : "pick workspace"}
           </button>
         )}
-        <button onClick={openHistory} title="browse saved sessions">
-          History
-        </button>
         {server?.base_url ? (
           <span
             className="api-chip"
@@ -847,6 +944,14 @@ export function Console(p: ConsoleProps) {
           </span>
         ) : (
           <span className="api-chip offline">api offline</span>
+        )}
+        {canContinue && (
+          <button
+            onClick={continueGen}
+            title="the model stopped on its own — pick up where it left off"
+          >
+            ▸ Continue
+          </button>
         )}
         {cur.turns.length > 0 && (
           <button onClick={newSession} disabled={streaming} title="start a fresh session (this one stays in history)">
@@ -877,8 +982,6 @@ export function Console(p: ConsoleProps) {
 
       {p.board ? (
         p.board
-      ) : histOpen ? (
-        historyPanel
       ) : fault ? (
         <div className="console-state">
           <div className="state-box" style={{ maxWidth: 680 }}>
@@ -918,7 +1021,9 @@ export function Console(p: ConsoleProps) {
             </div>
           </div>
         </div>
-      ) : ready ? (
+      ) : ready || cur.turns.length > 0 ? (
+        // Turns render even with no model loaded: reopening a saved session
+        // from the rail must be readable without igniting something first.
         <div className="transcript" ref={scrollRef}>
           {cur.turns.length === 0 && (
             <div className="transcript-empty">
@@ -994,7 +1099,7 @@ export function Console(p: ConsoleProps) {
         </div>
       )}
 
-      {!p.board && !histOpen && ready && ctxSize && (cur.turns.length > 0 || kvTokens > 0) && (
+      {!p.board && ready && ctxSize && (cur.turns.length > 0 || kvTokens > 0) && (
         <div className="timeline">
           <div className="timeline-track">
             {cur.turns.map((t, i) => {
@@ -1026,7 +1131,7 @@ export function Console(p: ConsoleProps) {
         </div>
       )}
 
-      {!p.board && !histOpen && (
+      {!p.board && (
         <>
           <div className="sampler-row">
             {sampler("temp", temp, setTemp)}
@@ -1074,4 +1179,4 @@ export function Console(p: ConsoleProps) {
       )}
     </div>
   );
-}
+});

@@ -105,13 +105,21 @@ function ContextCol({ est }: { est: VramEstimate }) {
         {est.context_options.map((o) => {
           const rec = o.ctx === est.ctx_size;
           const tight = o.fits && o.est_total_bytes > est.budget_bytes * 0.92;
+          // A rung is usable whenever any layer fits, not only on full offload.
+          // Marking partial rungs "✗" made the ladder claim nothing worked on
+          // models that were running perfectly well.
+          const usable = o.fits || o.n_gpu_layers > 0;
           return (
             <span key={o.ctx} className="rung">
-              <span className={o.fits ? "ok" : "no"}>{o.fits ? "✓" : "✗"}</span>
+              <span className={usable ? (o.fits ? "ok" : "part") : "no"}>
+                {o.fits ? "✓" : usable ? "◐" : "✗"}
+              </span>
               <span className={`k ${rec ? "hot" : ""}`} style={{ width: 36 }}>
                 {ctxLabel(o.ctx)}
               </span>
-              <span className="v">{gb(o.est_total_bytes)} GB</span>
+              <span className="v">
+                {o.fits ? `${gb(o.est_total_bytes)} GB` : `${o.n_gpu_layers}L`}
+              </span>
               {rec ? (
                 <span className="tag rec">● rec</span>
               ) : tight ? (
