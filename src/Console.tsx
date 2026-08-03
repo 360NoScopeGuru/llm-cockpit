@@ -133,6 +133,11 @@ interface ToolCall {
 
 const TOOL_NAMES = new Set(["list_dir", "read_file", "write_file", "run_command"]);
 const MAX_TOOL_ROUNDS = 24;
+/// Consecutive "you stopped early, keep going" nudges before handing control
+/// back. Capped separately from tool rounds and much lower: a tool round makes
+/// visible progress, a nudge might not, and each one costs a full generation.
+/// Reset as soon as the agent does something real.
+const MAX_NUDGES = 3;
 
 const estTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
 
@@ -264,6 +269,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   const cfgRef = useRef<{ ngl: number; ctx: number } | null>(null);
   const modelNameRef = useRef<string | null>(null);
   const roundsRef = useRef(0);
+  const nudgesRef = useRef(0);
 
   tabsRef.current = tabs;
   wsRef.current = p.workspace;
@@ -513,13 +519,27 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       // marker as done and nudge otherwise, instead of silently giving up.
       if (DONE_MARKER.test(last.content) || last.stopped) {
         roundsRef.current = 0;
+        nudgesRef.current = 0;
         return;
       }
-      if (roundsRef.current >= MAX_TOOL_ROUNDS) {
+      if (nudgesRef.current >= MAX_NUDGES || roundsRef.current >= MAX_TOOL_ROUNDS) {
+        nudgesRef.current = 0;
         roundsRef.current = 0;
+        patchTurns("code", (prev) => [
+          ...prev,
+          {
+            role: "assistant",
+            content:
+              `⚠ the model kept stopping early (${MAX_NUDGES} nudges). It may be ` +
+              `out of its depth on this task — press ▸ Continue to push on, or ` +
+              `give it a smaller step.`,
+            error: true,
+            ts: Date.now(),
+          },
+        ]);
         return;
       }
-      roundsRef.current += 1;
+      nudgesRef.current += 1;
       continueWith({
         role: "user",
         kind: "continue",
@@ -542,8 +562,11 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
         },
       ]);
       roundsRef.current = 0;
+      nudgesRef.current = 0;
       return;
     }
+    // A real tool call is progress — forgive any earlier stalls.
+    nudgesRef.current = 0;
     roundsRef.current += 1;
     if (call.tool === "list_dir" || call.tool === "read_file") {
       execTool(call);
@@ -666,6 +689,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       return;
     }
     roundsRef.current = 0;
+    nudgesRef.current = 0;
     const s = samplerRef.current;
     const snap: SamplerSnap = {
       temperature: parseFloat(s.temp) || null,
@@ -698,6 +722,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       /* ignore */
     }
     roundsRef.current = 0;
+    nudgesRef.current = 0;
     setPendingTool(null);
   }
 
@@ -707,6 +732,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     if (tab === "code") {
       setPendingTool(null);
       roundsRef.current = 0;
+      nudgesRef.current = 0;
     }
   }
 
