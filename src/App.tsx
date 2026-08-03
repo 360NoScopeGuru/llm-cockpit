@@ -60,6 +60,7 @@ export default function App() {
   } | null>(null);
   const [binaries, setBinaries] = useState<LlamaBinary[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [scale, setScale] = useState(1);
 
   const estimatesRef = useRef(estimates);
   estimatesRef.current = estimates;
@@ -93,7 +94,55 @@ export default function App() {
   useEffect(() => {
     rescan();
     invoke<LlamaBinary[]>("llama_binaries").then(setBinaries).catch(() => {});
-    invoke<Settings>("get_settings").then(setSettings).catch(() => {});
+    invoke<Settings>("get_settings")
+      .then((s) => {
+        setSettings(s);
+        if (s.ui_scale && s.ui_scale >= 0.5 && s.ui_scale <= 2.5) setScale(s.ui_scale);
+      })
+      .catch(() => {});
+  }, []);
+
+  // ---- UI scaling (independent of the DPI corrector below: this is user
+  // preference, applied as CSS zoom; the corrector fixes webview DPI bugs) ----
+
+  const scaleSaveTimer = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    (document.documentElement.style as CSSStyleDeclaration & { zoom: string }).zoom =
+      String(scale);
+    window.clearTimeout(scaleSaveTimer.current);
+    scaleSaveTimer.current = window.setTimeout(() => {
+      invoke("set_ui_scale", { scale }).catch(() => {});
+    }, 600);
+  }, [scale]);
+
+  const bumpScale = (d: number) =>
+    setScale((s) => Math.min(2, Math.max(0.7, Math.round((s + d) * 20) / 20)));
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey) return;
+      if (e.key === "=" || e.key === "+") {
+        e.preventDefault();
+        bumpScale(0.1);
+      } else if (e.key === "-") {
+        e.preventDefault();
+        bumpScale(-0.1);
+      } else if (e.key === "0") {
+        e.preventDefault();
+        setScale(1);
+      }
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      e.preventDefault();
+      bumpScale(e.deltaY < 0 ? 0.05 : -0.05);
+    };
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("wheel", onWheel);
+    };
   }, []);
 
   // WebView2 on Windows can lay the page out at physical-pixel width while
@@ -378,6 +427,17 @@ export default function App() {
     }
   }
 
+  async function pickWorkspace() {
+    try {
+      const dir = await open({ directory: true, title: "Grant the agent a workspace folder" });
+      if (typeof dir !== "string" || !dir) return;
+      const s = await invoke<Settings>("set_agent_workspace", { dir });
+      setSettings(s);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   async function pickBinary(path: string) {
     try {
       const s = await invoke<Settings>("set_preferred_binary", {
@@ -541,6 +601,8 @@ export default function App() {
             staged={staged}
             board={board}
             kvAlert={kvAlert}
+            workspace={settings?.agent_workspace ?? null}
+            onPickWorkspace={pickWorkspace}
           />
           <Dock
             selected={selected}
@@ -589,6 +651,15 @@ export default function App() {
             </option>
           ))}
         </select>
+        <span className="scale-ctl">
+          UI {Math.round(scale * 100)}%
+          <button onClick={() => bumpScale(-0.1)} title="Ctrl+- / Ctrl+wheel">
+            −
+          </button>
+          <button onClick={() => bumpScale(0.1)} title="Ctrl+= / Ctrl+wheel">
+            +
+          </button>
+        </span>
         <span>poll 1 Hz</span>
         {server?.base_url && <span className="api">api {server.base_url} · /v1</span>}
         <span className="spacer" />

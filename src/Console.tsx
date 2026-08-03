@@ -1,17 +1,26 @@
 import { ReactNode, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { InferenceMetrics, ServerStatus, ctxLabel } from "./types";
+import { Markdown } from "./Markdown";
+import { InferenceMetrics, ServerStatus, baseName, ctxLabel } from "./types";
 
 // The console: streaming chat wired straight to the running llama-server
-// through the Rust backend (no CORS, no browser tab — the server's root URL
-// intentionally serves no page; this is the UI). Owns the whole center pane:
-// cold / staged / ignition / fault states, the KV containment alert banner,
-// the session timeline, sampler chips and the composer. While a bench or
-// suite is running, `board` replaces the transcript.
+// through the Rust backend. Owns the whole center pane: cold / staged /
+// ignition / fault states, the KV containment alert banner, the session
+// timeline, sampler chips and the composer. While a bench or suite is
+// running, `board` replaces the transcript.
+//
+// AGENT MODE: when armed (and a workspace folder is granted), a system
+// prompt teaches the model a one-tool-per-reply protocol. Replies ending in
+// a ```tool fenced JSON block are parsed here; reads (list_dir/read_file)
+// execute immediately, writes and commands wait for an explicit APPROVE
+// click. Results are fed back as the next message and the loop continues
+// until the model answers without a tool block.
 
 interface Turn {
   role: "user" | "assistant";
+  kind?: "chat" | "tool-result";
+  toolName?: string;
   content: string;
   thinking?: string;
   meta?: string;
@@ -51,9 +60,54 @@ interface ConsoleProps {
   staged: StagedIgnite | null;
   board: ReactNode | null;
   kvAlert: boolean;
+  workspace: string | null;
+  onPickWorkspace: () => void;
 }
 
+interface ToolCall {
+  tool: "list_dir" | "read_file" | "write_file" | "run_command";
+  args: Record<string, string>;
+}
+
+const TOOL_NAMES = new Set(["list_dir", "read_file", "write_file", "run_command"]);
+const MAX_TOOL_ROUNDS = 24;
+
 const estTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
+
+const agentPrompt = (root: string) => `You are Tokamak Agent, a coding agent with tool access to the user's workspace folder on their Windows machine: ${root}
+
+To use a tool, end your reply with exactly one fenced block in this format:
+\`\`\`tool
+{"tool": "list_dir", "args": {"path": "."}}
+\`\`\`
+
+Tools:
+- list_dir {"path": "."} — list files and folders
+- read_file {"path": "relative\\file.txt"} — read a text file
+- write_file {"path": "relative\\file.txt", "content": "..."} — create or overwrite a file (the user must approve)
+- run_command {"command": "..."} — run a PowerShell command in the workspace (the user must approve)
+
+Rules:
+- Paths are relative to the workspace; you cannot access anything outside it.
+- Make at most ONE tool call per reply. After the tool block, stop and wait — the result arrives in the next message tagged [tool result].
+- Work step by step: inspect before you edit, verify after you change.
+- When the task is done (or no tool is needed), reply normally with no tool block.`;
+
+function parseToolCall(content: string): ToolCall | null {
+  const matches = [...content.matchAll(/```tool\s*\n?([\s\S]*?)```/g)];
+  if (matches.length === 0) return null;
+  try {
+    const obj = JSON.parse(matches[matches.length - 1][1]);
+    if (typeof obj?.tool !== "string" || !TOOL_NAMES.has(obj.tool)) return null;
+    return { tool: obj.tool, args: obj.args ?? {} };
+  } catch {
+    return null;
+  }
+}
+
+function stripToolBlock(content: string): string {
+  return content.replace(/```tool\s*\n?[\s\S]*?```\s*$/, "").trimEnd();
+}
 
 export function Console(p: ConsoleProps) {
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -64,17 +118,197 @@ export function Console(p: ConsoleProps) {
   const [topK, setTopK] = useState("40");
   const [topP, setTopP] = useState("0.95");
   const [minP, setMinP] = useState("0.05");
-  const [maxTok, setMaxTok] = useState("1024");
+  const [maxTok, setMaxTok] = useState("2048");
   const [copied, setCopied] = useState(false);
+  const [agentOn, setAgentOn] = useState(false);
+  const [pendingTool, setPendingTool] = useState<ToolCall | null>(null);
+  const [toolBusy, setToolBusy] = useState(false);
 
   const genId = useRef(0);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const turnsRef = useRef<Turn[]>([]);
+  const agentRef = useRef(false);
+  const wsRef = useRef<string | null>(null);
+  const systemRef = useRef("");
+  const samplerRef = useRef({ temp: "0.7", topK: "40", topP: "0.95", minP: "0.05", maxTok: "2048" });
+  const roundsRef = useRef(0);
+
+  turnsRef.current = turns;
+  agentRef.current = agentOn;
+  wsRef.current = p.workspace;
+  systemRef.current = system;
+  samplerRef.current = { temp, topK, topP, minP, maxTok };
 
   const server = p.server;
   const health = server?.running ? server.health : "stopped";
   const ready = !!server?.running && health === "ok";
   const igniting = !!server?.running && (health === "starting" || health === "loading");
   const fault = !!server?.error && !ready && !igniting;
+
+  // ---- message assembly ----
+
+  function buildMessages(allTurns: Turn[]) {
+    const sysParts: string[] = [];
+    if (agentRef.current && wsRef.current) sysParts.push(agentPrompt(wsRef.current));
+    if (systemRef.current.trim()) sysParts.push(systemRef.current.trim());
+    const messages: { role: string; content: string }[] = sysParts.length
+      ? [{ role: "system", content: sysParts.join("\n\n") }]
+      : [];
+    for (const t of allTurns) {
+      if (t.error || (t.role === "assistant" && !t.content && !t.meta)) continue;
+      messages.push({
+        role: t.role,
+        content:
+          t.kind === "tool-result" ? `[tool result: ${t.toolName}]\n${t.content}` : t.content,
+      });
+    }
+    return messages;
+  }
+
+  async function dispatch(allTurns: Turn[]) {
+    const id = ++genId.current;
+    setStreaming(true);
+    const s = samplerRef.current;
+    const num = (v: string) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    const int = (v: string) => {
+      const n = parseInt(v, 10);
+      return Number.isFinite(n) ? n : undefined;
+    };
+    try {
+      await invoke("chat_send", {
+        id,
+        messages: buildMessages(allTurns),
+        params: {
+          temperature: num(s.temp),
+          top_k: int(s.topK),
+          top_p: num(s.topP),
+          min_p: num(s.minP),
+          max_tokens: int(s.maxTok),
+        },
+      });
+    } catch (e) {
+      setStreaming(false);
+      setTurns((prev) => [
+        ...prev.slice(0, -1),
+        { role: "assistant", content: `⚠ ${e}`, error: true },
+      ]);
+    }
+  }
+
+  // ---- agent tool loop ----
+
+  async function execTool(call: ToolCall) {
+    const root = wsRef.current;
+    if (!root) return;
+    setPendingTool(null);
+    setToolBusy(true);
+    let result: string;
+    try {
+      if (call.tool === "list_dir") {
+        const entries = await invoke<{ name: string; is_dir: boolean; size_bytes: number }[]>(
+          "agent_list_dir",
+          { root, path: call.args.path ?? "." }
+        );
+        result =
+          entries
+            .map(
+              (e) =>
+                `${e.is_dir ? "dir " : "file"}  ${e.name}${
+                  e.is_dir ? "" : `  (${e.size_bytes.toLocaleString()} B)`
+                }`
+            )
+            .join("\n") || "(empty directory)";
+      } else if (call.tool === "read_file") {
+        const r = await invoke<{ content: string; size_bytes: number; truncated: boolean }>(
+          "agent_read_file",
+          { root, path: call.args.path ?? "" }
+        );
+        result = r.truncated
+          ? `${r.content}\n…[truncated — file is ${r.size_bytes.toLocaleString()} bytes]`
+          : r.content;
+      } else if (call.tool === "write_file") {
+        result = await invoke<string>("agent_write_file", {
+          root,
+          path: call.args.path ?? "",
+          content: call.args.content ?? "",
+        });
+      } else {
+        const r = await invoke<{
+          stdout: string;
+          stderr: string;
+          exit_code: number | null;
+          timed_out: boolean;
+        }>("agent_run_command", { root, command: call.args.command ?? "" });
+        result = [
+          `exit: ${r.timed_out ? "timed out (120 s)" : (r.exit_code ?? "unknown")}`,
+          r.stdout ? `stdout:\n${r.stdout}` : "stdout: (empty)",
+          r.stderr ? `stderr:\n${r.stderr}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+    } catch (e) {
+      result = `[tool error] ${e}`;
+    }
+    setToolBusy(false);
+    continueWith({
+      role: "user",
+      kind: "tool-result",
+      toolName: call.tool,
+      content: result,
+    });
+  }
+
+  function denyTool(call: ToolCall) {
+    setPendingTool(null);
+    continueWith({
+      role: "user",
+      kind: "tool-result",
+      toolName: call.tool,
+      content: "The user DENIED this tool call. Do not retry it; ask them or take another path.",
+    });
+  }
+
+  function continueWith(resultTurn: Turn) {
+    const next: Turn[] = [...turnsRef.current, resultTurn, { role: "assistant", content: "" }];
+    setTurns(next);
+    dispatch(next);
+  }
+
+  function maybeRunToolLoop() {
+    if (!agentRef.current || !wsRef.current) return;
+    const t = turnsRef.current;
+    const last = t[t.length - 1];
+    if (!last || last.role !== "assistant" || last.error || !last.content) return;
+    const call = parseToolCall(last.content);
+    if (!call) {
+      roundsRef.current = 0;
+      return;
+    }
+    if (roundsRef.current >= MAX_TOOL_ROUNDS) {
+      setTurns((prev) => [
+        ...prev,
+        {
+          role: "assistant",
+          content: `⚠ agent stopped after ${MAX_TOOL_ROUNDS} tool rounds — send a message to continue`,
+          error: true,
+        },
+      ]);
+      roundsRef.current = 0;
+      return;
+    }
+    roundsRef.current += 1;
+    if (call.tool === "list_dir" || call.tool === "read_file") {
+      execTool(call);
+    } else {
+      setPendingTool(call);
+    }
+  }
+
+  // ---- stream listeners ----
 
   useEffect(() => {
     // listen() resolves asynchronously; if this effect is torn down before the
@@ -127,6 +361,13 @@ export function Console(p: ConsoleProps) {
           }
           return next;
         });
+        // Agent loop: inspect the finished reply for a tool call. Deferred a
+        // tick so turnsRef reflects the update above.
+        if (!e.payload.error && !e.payload.stopped) {
+          setTimeout(maybeRunToolLoop, 30);
+        } else {
+          roundsRef.current = 0;
+        }
       })
     );
     return () => {
@@ -137,48 +378,22 @@ export function Console(p: ConsoleProps) {
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
-  }, [turns]);
+  }, [turns, pendingTool]);
+
+  // ---- actions ----
 
   async function send() {
     const text = input.trim();
-    if (!text || !ready || streaming) return;
+    if (!text || !ready || streaming || toolBusy || pendingTool) return;
     setInput("");
-    const id = ++genId.current;
-    const history = [...turns.filter((t) => !t.error), { role: "user" as const, content: text }];
-    setTurns([...turns, { role: "user", content: text }, { role: "assistant", content: "" }]);
-    setStreaming(true);
-    const messages = [
-      ...(system.trim() ? [{ role: "system", content: system.trim() }] : []),
-      ...history.map((t) => ({ role: t.role, content: t.content })),
+    roundsRef.current = 0;
+    const next: Turn[] = [
+      ...turns,
+      { role: "user", content: text },
+      { role: "assistant", content: "" },
     ];
-    // NaN → undefined, but keep legitimate zeros (temp 0 = greedy decoding).
-    const num = (s: string) => {
-      const v = parseFloat(s);
-      return Number.isFinite(v) ? v : undefined;
-    };
-    const int = (s: string) => {
-      const v = parseInt(s, 10);
-      return Number.isFinite(v) ? v : undefined;
-    };
-    try {
-      await invoke("chat_send", {
-        id,
-        messages,
-        params: {
-          temperature: num(temp),
-          top_k: int(topK),
-          top_p: num(topP),
-          min_p: num(minP),
-          max_tokens: int(maxTok),
-        },
-      });
-    } catch (e) {
-      setStreaming(false);
-      setTurns((prev) => [
-        ...prev.slice(0, -1),
-        { role: "assistant", content: `⚠ ${e}`, error: true },
-      ]);
-    }
+    setTurns(next);
+    dispatch(next);
   }
 
   async function stopGen() {
@@ -187,6 +402,14 @@ export function Console(p: ConsoleProps) {
     } catch {
       /* ignore */
     }
+    roundsRef.current = 0;
+    setPendingTool(null);
+  }
+
+  function clearSession() {
+    setTurns([]);
+    setPendingTool(null);
+    roundsRef.current = 0;
   }
 
   async function copyApi() {
@@ -196,15 +419,18 @@ export function Console(p: ConsoleProps) {
     setTimeout(() => setCopied(false), 1200);
   }
 
+  function toggleAgent() {
+    if (!agentOn && !p.workspace) {
+      p.onPickWorkspace();
+    }
+    setAgentOn(!agentOn);
+  }
+
   const kvTokens = p.metrics?.kv_cache_tokens ?? 0;
   const kvPct = Math.round((p.metrics?.kv_cache_usage_ratio ?? 0) * 100);
+  const busyLoop = streaming || toolBusy || !!pendingTool;
 
-  const sampler = (
-    label: string,
-    value: string,
-    set: (v: string) => void,
-    wide = false
-  ) => (
+  const sampler = (label: string, value: string, set: (v: string) => void, wide = false) => (
     <span className="sampler">
       {label}
       <input
@@ -216,6 +442,58 @@ export function Console(p: ConsoleProps) {
     </span>
   );
 
+  // ---- turn rendering ----
+
+  function renderTurn(t: Turn, i: number) {
+    const isLast = i === turns.length - 1;
+    if (t.kind === "tool-result") {
+      return (
+        <details key={i} className="tool-card result">
+          <summary>
+            <span className="tool-tag">⚙ {t.toolName}</span> result ·{" "}
+            {t.content.split("\n").length} lines
+          </summary>
+          <pre>{t.content}</pre>
+        </details>
+      );
+    }
+    const call = t.role === "assistant" && !streaming ? parseToolCall(t.content) : null;
+    const body = call ? stripToolBlock(t.content) : t.content;
+    return (
+      <div key={i} className={`turn ${t.role} ${t.error ? "error-turn" : ""}`}>
+        <div className={`turn-label ${t.role}`}>
+          {t.role === "user" ? "You" : p.modelName ?? "Model"}
+        </div>
+        {t.thinking && (
+          <details className="thinking-box" open={isLast && streaming && !t.content}>
+            <summary>thinking · ~{estTokens(t.thinking)} tok</summary>
+            <div className="thinking">{t.thinking}</div>
+          </details>
+        )}
+        <div className="turn-body">
+          {t.role === "assistant" ? <Markdown text={body} /> : body}
+          {t.role === "assistant" && streaming && isLast && <span className="caret-blink" />}
+        </div>
+        {call && (
+          <div className="tool-card">
+            <div className="tool-head">
+              <span className="tool-tag">⚙ {call.tool}</span>
+              <span className="tool-args">
+                {call.tool === "run_command" ? call.args.command : call.args.path}
+              </span>
+            </div>
+          </div>
+        )}
+        {t.role === "assistant" && streaming && isLast && p.metrics && (
+          <div className="turn-meta">
+            streaming · {p.metrics.predicted_tokens_per_sec.toFixed(1)} tok/s
+          </div>
+        )}
+        {t.meta && <div className="turn-meta">{t.meta}</div>}
+      </div>
+    );
+  }
+
   return (
     <div className="console">
       <div className="console-head">
@@ -223,6 +501,18 @@ export function Console(p: ConsoleProps) {
         {p.modelName && <span className="console-model">{p.modelName}</span>}
         {p.cfgText && <span className="console-cfg">{p.cfgText}</span>}
         <span className="spacer" />
+        <button
+          className={agentOn ? "primary" : ""}
+          onClick={toggleAgent}
+          title="Agent mode: the model can list/read files freely and write files or run commands with your approval, inside the workspace folder"
+        >
+          Agent {agentOn ? "On" : "Off"}
+        </button>
+        {agentOn && (
+          <button onClick={p.onPickWorkspace} title={p.workspace ?? "pick a workspace folder"}>
+            ⌂ {p.workspace ? baseName(p.workspace) : "pick workspace"}
+          </button>
+        )}
         {server?.base_url ? (
           <span
             className="api-chip"
@@ -235,7 +525,7 @@ export function Console(p: ConsoleProps) {
           <span className="api-chip offline">api offline</span>
         )}
         {turns.length > 0 && (
-          <button onClick={() => setTurns([])} disabled={streaming}>
+          <button onClick={clearSession} disabled={streaming}>
             Clear
           </button>
         )}
@@ -250,7 +540,7 @@ export function Console(p: ConsoleProps) {
             {p.ctxSize ? ` / ${p.ctxSize.toLocaleString()}` : ""} tok · context is nearly full
           </span>
           <span className="spacer" />
-          <button onClick={() => setTurns([])} disabled={streaming}>
+          <button onClick={clearSession} disabled={streaming}>
             Clear Session
           </button>
           {streaming && (
@@ -305,31 +595,43 @@ export function Console(p: ConsoleProps) {
       ) : ready ? (
         <div className="transcript" ref={scrollRef}>
           {turns.length === 0 && (
-            <div style={{ color: "var(--low)", paddingTop: 8 }}>
-              Reactor live. Message it below — or point any OpenAI client at the api endpoint
-              above.
+            <div className="transcript-empty">
+              Reactor live. Message it below — or arm{" "}
+              <span style={{ color: "var(--plasma)" }}>AGENT</span> mode to let it read and write
+              code in a workspace folder, Claude Code style.
             </div>
           )}
-          {turns.map((t, i) => (
-            <div key={i} className={`turn ${t.role} ${t.error ? "error-turn" : ""}`}>
-              <div className={`turn-label ${t.role}`}>
-                {t.role === "user" ? "You" : p.modelName ?? "Model"}
-              </div>
-              {t.thinking && <span className="thinking">{t.thinking}</span>}
-              <div className="turn-body">
-                {t.content}
-                {t.role === "assistant" && streaming && i === turns.length - 1 && (
-                  <span className="caret-blink" />
-                )}
-              </div>
-              {t.role === "assistant" && streaming && i === turns.length - 1 && p.metrics && (
-                <div className="turn-meta">
-                  streaming · {p.metrics.predicted_tokens_per_sec.toFixed(1)} tok/s
-                </div>
-              )}
-              {t.meta && <div className="turn-meta">{t.meta}</div>}
+          {turns.map(renderTurn)}
+          {toolBusy && (
+            <div className="tool-card running-tool">
+              <span className="tool-tag">⚙ running tool…</span>
             </div>
-          ))}
+          )}
+          {pendingTool && (
+            <div className="tool-card approve">
+              <div className="tool-head">
+                <span className="tool-tag danger">
+                  ⚠ {pendingTool.tool === "run_command" ? "RUN COMMAND" : "WRITE FILE"}
+                </span>
+                <span className="tool-args">
+                  {pendingTool.tool === "run_command"
+                    ? pendingTool.args.command
+                    : pendingTool.args.path}
+                </span>
+              </div>
+              {pendingTool.tool === "write_file" && (
+                <pre className="tool-preview">{(pendingTool.args.content ?? "").slice(0, 2000)}</pre>
+              )}
+              <div className="tool-actions">
+                <button className="primary" onClick={() => execTool(pendingTool)}>
+                  Approve
+                </button>
+                <button className="danger" onClick={() => denyTool(pendingTool)}>
+                  Deny
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : p.staged ? (
         <div className="console-state">
@@ -367,7 +669,7 @@ export function Console(p: ConsoleProps) {
                   key={i}
                   className={`blk ${t.role} ${live ? "live" : ""}`}
                   style={{ width: `${w}%` }}
-                  title={`${t.role} · ~${tok} tok`}
+                  title={`${t.kind === "tool-result" ? "tool" : t.role} · ~${tok} tok`}
                 />
               );
             })}
@@ -397,9 +699,15 @@ export function Console(p: ConsoleProps) {
           </div>
           <div className="composer">
             <textarea
-              placeholder={ready ? "message the reactor…" : "ignite a model first"}
+              placeholder={
+                ready
+                  ? agentOn
+                    ? "give the agent a task in the workspace…"
+                    : "message the reactor…"
+                  : "ignite a model first"
+              }
               value={input}
-              disabled={!ready || streaming}
+              disabled={!ready || busyLoop}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -408,7 +716,7 @@ export function Console(p: ConsoleProps) {
                 }
               }}
             />
-            {streaming ? (
+            {busyLoop ? (
               <button className="send danger" onClick={stopGen}>
                 ■ Stop
               </button>

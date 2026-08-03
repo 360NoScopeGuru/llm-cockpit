@@ -51,15 +51,28 @@ The answer to "which file should I download?". For the selected model, Tokamak e
 
 Each rung shows the estimated weight size and remaining headroom, with your current file marked.
 
-### Ignition and live telemetry: The Core
-Press IGNITE and Tokamak launches `llama-server` with the recommended (or your chosen) settings, then renders the machine as a reactor:
+### Ignition and live telemetry: the Control Rod panel
+Press IGNITE and Tokamak launches `llama-server` with the recommended (or your chosen) settings, then renders the machine as a warm-graphite instrument panel where a single plasma-amber hue always means energy and load:
 
-- **Outer ring:** VRAM, teal to violet, with GB tick marks. Hovering any model in the hangar projects its estimated footprint onto the ring as a pulsing ghost arc, so you can see whether it fits *before* launching. Overflow flashes red at the end of the ring.
-- **Inner ring:** GPU utilization, tinted by temperature (teal, amber, red).
-- **Amber band:** KV cache fill. At 90 percent it goes into a pulsing red alert with a glitch echo, and the token particles visibly drag: your context is nearly full and you can see it happening.
-- **Particles:** token generation, spawning at the live decode rate.
-- **Center readout:** decode tok/s while generating, prefill rate, model state (READY / IGNITION / FAULT), GPU temperature when idle.
-- The right rail carries RAM, CPU, GPU temperature, power draw against its limit, and core/memory clocks, polled at 1 Hz.
+- **Rod bank:** VRAM as fuel rods, one rod per GB. While a model runs the rods segment into weights, KV cache in use, and KV reserved. Hovering any model in the library projects its estimated footprint as dashed ghost rods, so you can see whether it fits *before* launching.
+- **Flux trace:** the last 60 seconds of decode rate, GPU utilization, and temperature as scrolling heat strips; brightness is the value.
+- **KV containment alert:** at 90 percent cache fill the third strip flips to a red KV pressure trace, a banner drops into the console, and the rail's KV box pulses. Your context is nearly full and you can see it happening.
+- **Decode headline:** live tok/s in 42px numerals, with prefill rate and total tokens.
+- **Session timeline:** every turn of the conversation as a block sized by tokens, laid against the context ceiling.
+- The rail also carries RAM, CPU, GPU temperature, power draw against its limit, and core/memory clocks, polled at 1 Hz.
+
+### Agent mode
+Arm AGENT in the console and grant a workspace folder, and the running model gets Claude Code style abilities inside that folder:
+
+- `list_dir` and `read_file` run automatically so the model can explore the project.
+- `write_file` and `run_command` (PowerShell) stop at an approval card; nothing destructive happens without your click.
+- Every tool is sandboxed to the workspace you granted. Path escapes (`..`, absolute paths, symlink tricks) are rejected in the Rust backend, not just hidden in the UI.
+- The loop continues until the model answers without requesting a tool, with a hard cap per task so a confused model cannot spin forever.
+
+### Console comforts
+- Model output renders as markdown: headers, bold, lists, tables, fenced code with language tags. Rendering builds React elements directly, never raw HTML, so model output cannot inject anything into the app.
+- Reasoning models stream their thinking into a collapsible section that folds away once the answer starts.
+- UI scale control in the status bar, plus Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+scroll, persisted across restarts.
 
 Binary resolution is automatic: LM Studio's bundled llama.cpp builds are discovered and ranked (CUDA 12 above CUDA above Vulkan above CPU), with `llama-server` on your PATH as a fallback. You can pin a specific binary in the header. The CUDA runtime DLLs that LM Studio keeps in a separate vendor folder are injected into the child process search path automatically.
 
@@ -131,16 +144,19 @@ src-tauri/src/
                  parsing, kill-on-drop process hygiene
   benchmark.rs   measured benchmark runner + Markdown report export
   chat.rs        SSE streaming chat client on a worker thread, reasoning aware
-  settings.rs    persisted JSON settings (extra folders, preferred binary)
+  tools.rs       agent tools (list/read/write/run), sandboxed to the workspace
+  settings.rs    persisted JSON settings (folders, binary, UI scale, workspace)
   lib.rs         Tauri commands wiring it all together
 
 src/
-  App.tsx        orchestration, polling, launch/bench/suite flows
-  Core.tsx       the canvas reactor (rings, ghost arc, particles, alerts)
-  Hangar.tsx     model library with fit verdicts
-  Rail.tsx       vitals, config panel, quant advisor, bench and suite panels
-  Console.tsx    streaming chat drawer
-  styles.css     "The Core" design system
+  App.tsx        orchestration, polling, launch/bench/suite flows, UI scaling
+  Library.tsx    fuel library with fit verdicts
+  Rail.tsx       telemetry stack: flux trace, rod bank, vitals, KV alert
+  Flux.tsx       the 60 second canvas heat strips
+  Dock.tsx       containment budget, context ladder, quant advisor, bench detail
+  Console.tsx    streaming chat, markdown rendering, agent loop + approvals
+  Markdown.tsx   safe markdown to React renderer for model output
+  styles.css     "Control Rod" design system
 ```
 
 Design notes:

@@ -6,6 +6,7 @@ mod llama;
 mod scanner;
 mod settings;
 mod telemetry;
+mod tools;
 
 use std::path::Path;
 
@@ -61,6 +62,44 @@ fn get_settings() -> settings::Settings {
 #[tauri::command]
 fn set_preferred_binary(path: Option<String>) -> Result<settings::Settings, String> {
     settings::set_preferred_binary(path)
+}
+
+/// Persist the user's UI zoom factor.
+#[tauri::command]
+fn set_ui_scale(scale: f64) -> Result<settings::Settings, String> {
+    settings::set_ui_scale(scale)
+}
+
+/// Persist the agent workspace folder (None disables the agent).
+#[tauri::command]
+fn set_agent_workspace(dir: Option<String>) -> Result<settings::Settings, String> {
+    settings::set_agent_workspace(dir)
+}
+
+/// Agent tool: list a directory inside the workspace sandbox.
+#[tauri::command]
+fn agent_list_dir(root: String, path: String) -> Result<Vec<tools::DirEntryInfo>, String> {
+    tools::list_dir(&root, &path)
+}
+
+/// Agent tool: read a text file inside the workspace sandbox.
+#[tauri::command]
+fn agent_read_file(root: String, path: String) -> Result<tools::ReadFileResult, String> {
+    tools::read_file(&root, &path)
+}
+
+/// Agent tool: write a file inside the workspace sandbox. The frontend gates
+/// this behind an explicit user approval click.
+#[tauri::command]
+fn agent_write_file(root: String, path: String, content: String) -> Result<String, String> {
+    tools::write_file(&root, &path, &content)
+}
+
+/// Agent tool: run a PowerShell command in the workspace. The frontend gates
+/// this behind an explicit user approval click.
+#[tauri::command]
+fn agent_run_command(root: String, command: String) -> Result<tools::RunCommandResult, String> {
+    tools::run_command(&root, &command)
 }
 
 /// Start a streaming chat generation against the running server.
@@ -252,6 +291,12 @@ pub fn run() {
             remove_model_dir,
             get_settings,
             set_preferred_binary,
+            set_ui_scale,
+            set_agent_workspace,
+            agent_list_dir,
+            agent_read_file,
+            agent_write_file,
+            agent_run_command,
             gpu_telemetry,
             true_client_size,
             llama_binaries,
