@@ -1,6 +1,6 @@
 [package]
 name = "tokamak"
-version = "0.1.0"
+version = "0.1.1"
 description = "Tokamak: a reactor room for local LLMs. Model library, hardware-aware auto-config, measured benchmarks, live telemetry."
 authors = ["vamsh <vamsheedharan@gmail.com>"]
 edition = "2021"
