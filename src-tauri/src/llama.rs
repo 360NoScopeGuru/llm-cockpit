@@ -40,6 +40,18 @@ pub struct LlamaServerConfig {
     pub binary_path: Option<String>,
     #[serde(default)]
     pub flash_attn: bool,
+    /// KV cache element type (`f16` default, `q8_0` ≈ half the KV memory for
+    /// the same context, `q4_0` ≈ a quarter). Trading KV precision for context
+    /// length is the cheapest way to grow the usable window on fixed VRAM.
+    #[serde(default)]
+    pub cache_type_k: Option<String>,
+    #[serde(default)]
+    pub cache_type_v: Option<String>,
+    /// Slide the window instead of halting when a conversation fills the
+    /// context. llama.cpp defaults this OFF, which makes long chats die with
+    /// `finish_reason: "length"` rather than degrade gracefully.
+    #[serde(default)]
+    pub context_shift: bool,
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
@@ -304,6 +316,25 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
     if cfg.flash_attn {
         args.push("-fa".into());
     }
+    // Quantized KV requires flash attention to be active; the binary defaults
+    // `-fa auto`, so only force it on when the caller has not already.
+    if cfg.cache_type_k.is_some() || cfg.cache_type_v.is_some() {
+        if !cfg.flash_attn {
+            args.push("-fa".into());
+            args.push("on".into());
+        }
+        if let Some(k) = &cfg.cache_type_k {
+            args.push("-ctk".into());
+            args.push(k.clone());
+        }
+        if let Some(v) = &cfg.cache_type_v {
+            args.push("-ctv".into());
+            args.push(v.clone());
+        }
+    }
+    if cfg.context_shift {
+        args.push("--context-shift".into());
+    }
     args.extend(cfg.extra_args.iter().cloned());
     args
 }
@@ -504,6 +535,9 @@ mod tests {
             port: 8137,
             binary_path: None,
             flash_attn: true,
+            cache_type_k: None,
+            cache_type_v: None,
+            context_shift: false,
             extra_args: vec!["--verbose".into()],
         };
         let args = build_args(&cfg);
@@ -524,12 +558,38 @@ mod tests {
             port: 8137,
             binary_path: None,
             flash_attn: false,
+            cache_type_k: None,
+            cache_type_v: None,
+            context_shift: false,
             extra_args: vec![],
         };
         let args = build_args(&cfg);
         assert!(!args.contains(&"-ngl".to_string()));
         assert!(!args.contains(&"-c".to_string()));
         assert!(!args.contains(&"-fa".to_string()));
+    }
+
+    #[test]
+    fn kv_quant_and_context_shift_args() {
+        let cfg = LlamaServerConfig {
+            model_path: "m.gguf".into(),
+            n_gpu_layers: None,
+            ctx_size: Some(32768),
+            port: 8137,
+            binary_path: None,
+            flash_attn: false,
+            cache_type_k: Some("q8_0".into()),
+            cache_type_v: Some("q8_0".into()),
+            context_shift: true,
+            extra_args: vec![],
+        };
+        let args = build_args(&cfg);
+        assert!(args.windows(2).any(|w| w[0] == "-ctk" && w[1] == "q8_0"));
+        assert!(args.windows(2).any(|w| w[0] == "-ctv" && w[1] == "q8_0"));
+        assert!(args.contains(&"--context-shift".to_string()));
+        // Quantized KV is only valid with flash attention, so it must be forced
+        // on even though the caller left flash_attn false.
+        assert!(args.windows(2).any(|w| w[0] == "-fa" && w[1] == "on"));
     }
 
     #[test]
@@ -595,6 +655,9 @@ llamacpp:requests_processing 1
             port: 8137,
             binary_path: None,
             flash_attn: false,
+            cache_type_k: None,
+            cache_type_v: None,
+            context_shift: false,
             extra_args: vec![],
         };
 

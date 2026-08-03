@@ -90,6 +90,9 @@ fn benchmark_one(model_path: &str, cfg: &BenchConfig) -> BenchResult {
         port: BENCH_PORT,
         binary_path: None,
         flash_attn: false,
+        cache_type_k: None,
+        cache_type_v: None,
+        context_shift: false,
         extra_args: vec![],
     };
 

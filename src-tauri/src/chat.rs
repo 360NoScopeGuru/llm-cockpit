@@ -49,6 +49,15 @@ struct ChatDone {
     tokens: u64,
     decode_tok_s: f64,
     stopped: bool,
+    /// Why the server stopped generating, straight from the stream's
+    /// `finish_reason`: `"stop"` (hit EOS — a real, complete answer) or
+    /// `"length"` (ran into `max_tokens`, or filled the context). `None` means
+    /// the stream ended without ever saying why, which is itself a symptom —
+    /// the connection dropped or the server died mid-answer.
+    ///
+    /// Without this the UI cannot tell a finished answer from a guillotined
+    /// one: both just stop arriving. Never drop it on the floor.
+    finish: Option<String>,
     error: Option<String>,
 }
 
@@ -139,6 +148,7 @@ fn run_stream(
                 tokens: 0,
                 decode_tok_s: 0.0,
                 stopped: false,
+                finish: None,
                 error: Some(format!("request failed: {e}")),
             }
         }
@@ -149,18 +159,32 @@ fn run_stream(
     let mut first_token: Option<Instant> = None;
     let mut last_token = Instant::now();
     let mut stopped = false;
+    let mut finish: Option<String> = None;
+    let mut read_err: Option<String> = None;
 
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
             stopped = true;
             break; // dropping the reader closes the connection
         }
-        let Ok(line) = line else { break };
+        // A mid-stream read failure (read timeout, server crash, reset socket)
+        // used to `break` silently and report a clean finish, so a truncated
+        // answer looked complete. Surface it instead.
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                read_err = Some(format!("stream interrupted after {tokens} tokens: {e}"));
+                break;
+            }
+        };
         let Some(payload) = sse_payload(&line) else {
             continue;
         };
         if payload == "[DONE]" {
             break;
+        }
+        if let Some(reason) = extract_finish(payload) {
+            finish = Some(reason);
         }
         if let Some((content, reasoning)) = extract_delta(payload) {
             tokens += 1;
@@ -196,13 +220,25 @@ fn run_stream(
         tokens,
         decode_tok_s,
         stopped,
-        error: None,
+        finish,
+        error: read_err,
     }
 }
 
 /// Extract the payload of an SSE `data:` line, if this line is one.
 fn sse_payload(line: &str) -> Option<&str> {
     line.strip_prefix("data:").map(str::trim)
+}
+
+/// Pull `finish_reason` out of a streaming chunk. It rides on the final chunk,
+/// whose `delta` is empty — so this is checked separately from `extract_delta`.
+fn extract_finish(payload: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    v.get("choices")?
+        .get(0)?
+        .get("finish_reason")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// Pull the text delta out of a streaming chunk: `delta.content` (answer) or
@@ -254,6 +290,23 @@ mod tests {
         assert_eq!(extract_delta(fin), None);
     }
 
+    #[test]
+    fn extracts_finish_reason() {
+        // The reason rides on a chunk whose delta is empty — the one case
+        // extract_delta ignores, which is exactly why it needs its own parse.
+        let cut = r#"{"choices":[{"delta":{},"finish_reason":"length"}]}"#;
+        assert_eq!(extract_finish(cut), Some("length".to_string()));
+        assert_eq!(extract_delta(cut), None);
+
+        let done = r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#;
+        assert_eq!(extract_finish(done), Some("stop".to_string()));
+
+        // Ordinary content chunks carry no reason (it is JSON null until the end).
+        let mid = r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#;
+        assert_eq!(extract_finish(mid), None);
+        assert_eq!(extract_delta(mid), Some(("hi".to_string(), false)));
+    }
+
     /// Real end-to-end chat stream against the 4B model. Ignored by default;
     /// run with: cargo test -- --ignored --nocapture chat_real_stream
     #[test]
@@ -276,6 +329,9 @@ mod tests {
             port: 8141,
             binary_path: None,
             flash_attn: false,
+            cache_type_k: None,
+            cache_type_v: None,
+            context_shift: false,
             extra_args: vec![],
         })
         .expect("start");

@@ -252,6 +252,10 @@ export default function App() {
         n_gpu_layers: ngl ?? est?.n_gpu_layers ?? 999,
         ctx_size: ctx ?? est?.ctx_size ?? 4096,
         port: PORT,
+        // llama.cpp ships context shift OFF, so a chat that fills the window
+        // just stops answering. Sliding the oldest turns out degrades far more
+        // gracefully than refusing to generate.
+        context_shift: true,
       };
       const status = await invoke<ServerStatus>("llama_start", { config: cfg });
       setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size });
