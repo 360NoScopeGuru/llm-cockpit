@@ -24,6 +24,11 @@ const OVERHEAD_BYTES: u64 = 400 * 1024 * 1024;
 /// f16 KV cache: 2 bytes per element (the llama.cpp default).
 const KV_ELEM_BYTES: u64 = 2;
 
+/// Context to aim for when a model cannot be fully offloaded. Below this,
+/// agent runs and long documents fill the window mid-task; the layers traded
+/// away to reach it are the cheaper loss.
+const TARGET_PARTIAL_CTX: u64 = 8192;
+
 /// Candidate context sizes to consider, filtered to the model's native max.
 const CANDIDATE_CTX: &[u32] = &[
     2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144,
@@ -45,7 +50,13 @@ pub struct ModelShape {
 pub struct ContextOption {
     pub ctx: u32,
     pub est_total_bytes: u64,
+    /// True when every layer fits on the GPU at this context.
     pub fits: bool,
+    /// Layers that actually fit at this context. A rung with `fits: false` but
+    /// a non-zero count is still perfectly usable — just partially offloaded.
+    /// Reporting only `fits` made the whole ladder read as unusable on models
+    /// that were running fine at partial offload.
+    pub n_gpu_layers: u32,
 }
 
 /// One quant level evaluated by the advisor.
@@ -261,6 +272,16 @@ fn kv_bytes(shape: &ModelShape, ctx: u64, layers_on_gpu: u64) -> u64 {
         .saturating_mul(KV_ELEM_BYTES)
 }
 
+/// Most layers that fit on the GPU at a given context, 0 if none do.
+fn max_layers_at(shape: &ModelShape, ctx: u64, budget: u64) -> u64 {
+    for n in (0..=shape.n_layers).rev() {
+        if weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n) <= budget {
+            return n;
+        }
+    }
+    0
+}
+
 fn weights_bytes(shape: &ModelShape, layers_on_gpu: u64) -> u64 {
     if shape.n_layers == 0 {
         return 0;
@@ -282,7 +303,9 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         .into_iter()
         .collect();
 
-    // Full-offload feasibility per candidate context.
+    // Per candidate context: does it fit fully, and if not, how many layers do
+    // fit? Both numbers matter — a model that cannot fully offload is still
+    // usable, and the largest usable context is usually a partial-offload one.
     let weights_full = weights_bytes(shape, shape.n_layers);
     let context_options: Vec<ContextOption> = candidates
         .iter()
@@ -293,6 +316,8 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
                 ctx,
                 est_total_bytes: total,
                 fits: total <= budget,
+                n_gpu_layers: max_layers_at(shape, ctx as u64, budget)
+                    .min(u32::MAX as u64) as u32,
             }
         })
         .collect();
@@ -318,16 +343,18 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         };
     }
 
-    // Can't fully offload — pick a modest context and maximize offloaded layers.
-    let ctx = 4096u64.min(shape.native_ctx);
-    let mut best_layers = 0u64;
-    for n in (0..=shape.n_layers).rev() {
-        let total = weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n);
-        if total <= budget {
-            best_layers = n;
-            break;
-        }
-    }
+    // Can't fully offload. Aim for a context that is actually usable rather
+    // than the smallest one that works: 4K is below what agent or long-document
+    // work needs, and the layers given up to reach 8K cost far less than
+    // running out of context mid-task. Step down only if the target won't fit.
+    let target = TARGET_PARTIAL_CTX.min(shape.native_ctx);
+    let (ctx, best_layers) = [target, 4096, 2048]
+        .into_iter()
+        .map(|c| c.min(shape.native_ctx))
+        .filter(|&c| c > 0)
+        .map(|c| (c, max_layers_at(shape, c, budget)))
+        .find(|&(_, layers)| layers > 0)
+        .unwrap_or((4096u64.min(shape.native_ctx).max(1), 0));
 
     if best_layers == 0 {
         notes.push("model won't fit in VRAM even partially; will run on CPU".into());
@@ -336,6 +363,13 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
             "partial offload: {best_layers}/{} layers fit at {ctx} ctx",
             shape.n_layers
         ));
+        if best_layers < shape.n_layers {
+            notes.push(
+                "more context is available lower down the ladder — each rung trades \
+                 GPU layers (speed) for context length"
+                    .into(),
+            );
+        }
     }
 
     let weights = weights_bytes(shape, best_layers);
@@ -530,6 +564,36 @@ mod tests {
             for n in &est.notes {
                 println!("     note: {n}");
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod real_ladder {
+    use super::*;
+
+    /// Prints the ladder for the 27B on a 17.1 GB card — the exact case that
+    /// was reporting "nothing fits" while running fine at 54 layers.
+    /// cargo test -- --ignored --nocapture ladder_for_27b
+    #[test]
+    #[ignore]
+    fn ladder_for_27b() {
+        let shape = ModelShape {
+            file_size: 16_500_000_000,
+            n_layers: 64,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 262_144,
+        };
+        let est = estimate(&shape, 17_100_000_000, 17_100_000_000, vec![]);
+        println!("\npicked: {} layers @ {} ctx", est.n_gpu_layers, est.ctx_size);
+        println!("{:>8}  {:>6}  {:>10}", "ctx", "layers", "full?");
+        for o in &est.context_options {
+            println!("{:>8}  {:>6}  {:>10}", o.ctx, o.n_gpu_layers, o.fits);
+        }
+        for n in &est.notes {
+            println!("note: {n}");
         }
     }
 }

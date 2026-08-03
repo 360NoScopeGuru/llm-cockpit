@@ -1405,6 +1405,10 @@ select:focus {
 .ladder .no {
   color: var(--danger);
 }
+/* Partial offload — usable, just not every layer on the GPU. */
+.ladder .part {
+  color: var(--plasma);
+}
 .ladder .k {
   color: var(--mid);
   width: 52px;

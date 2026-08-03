@@ -84,7 +84,11 @@ export interface ServerStatus {
 export interface ContextOption {
   ctx: number;
   est_total_bytes: number;
+  /// All layers fit on the GPU at this context.
   fits: boolean;
+  /// Layers that fit at this context — non-zero rungs are usable even when
+  /// `fits` is false (partial offload).
+  n_gpu_layers: number;
 }
 
 export interface QuantOption {
