@@ -160,6 +160,8 @@ export interface Settings {
   preferred_binary: string | null;
   ui_scale?: number | null;
   agent_workspace?: string | null;
+  /// KV cache element type: "f16" | "q8_0" | "q4_0".
+  kv_cache_type?: string | null;
 }
 
 // ---- chat history (mirrors history.rs) ----
@@ -222,8 +224,13 @@ export interface SessionMeta {
 
 // ---- formatting helpers used across components ----
 
+/// Bytes as GiB, which is what GPU vendors, drivers and everyone else means by
+/// "GB" for VRAM. NVML reports a 16 GB card as 16303 MiB = 15.92 GiB; dividing
+/// by 1e9 turns that into "17.1", so every card looked ~7% larger than it is.
+export const BYTES_PER_GB = 1024 * 1024 * 1024;
+
 export function gb(bytes: number, digits = 1): string {
-  return `${(bytes / 1e9).toFixed(digits)}`;
+  return `${(bytes / BYTES_PER_GB).toFixed(digits)}`;
 }
 
 export function ctxLabel(n: number | null): string {

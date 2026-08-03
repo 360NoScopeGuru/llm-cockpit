@@ -85,6 +85,101 @@ impl ChatState {
     }
 }
 
+/// Ask the running model for a short title for a session.
+///
+/// Deliberately *not* routed through `start_stream`: that path is single-flight
+/// and arming it would cancel whatever the user is generating. This is a plain
+/// blocking request with its own connection and a tight token budget.
+pub fn generate_title(base_url: &str, transcript: &str) -> Result<String, String> {
+    let prompt = format!(
+        "Summarise this conversation as a title of at most 6 words.\n\
+         Reply with the title only — no quotes, no punctuation at the end, no \
+         preamble, no explanation.\n\n{transcript}"
+    );
+    let body = json!({
+        "messages": [{ "role": "user", "content": prompt }],
+        "stream": false,
+        "temperature": 0.3,
+        // Naming a chat does not need reasoning, and letting a reasoning model
+        // think here is actively harmful: measured on qwen3:14b, thinking ran
+        // to 1.2-4k tokens and regularly blew past the cap, returning an empty
+        // title. Qwen-family templates honour this switch and drop to zero
+        // reasoning tokens; models that ignore it are covered by the generous
+        // cap and the reasoning_content fallback below.
+        "chat_template_kwargs": { "enable_thinking": false },
+        "max_tokens": 2000,
+    });
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(3))
+        .timeout_read(Duration::from_secs(90))
+        .build();
+    let text = agent
+        .post(&format!("{base_url}/v1/chat/completions"))
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())
+        .map_err(|e| format!("title request failed: {e}"))?
+        .into_string()
+        .map_err(|e| e.to_string())?;
+
+    let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let msg = v
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"));
+    let pick = |key: &str| {
+        msg.and_then(|m| m.get(key))
+            .and_then(|c| c.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    // A model that ignored `enable_thinking` and then ran out of budget leaves
+    // content empty with everything in reasoning_content — still salvageable.
+    let raw = pick("content")
+        .or_else(|| pick("reasoning_content"))
+        .unwrap_or("");
+    let title = clean_title(raw);
+    if title.is_empty() {
+        return Err("model returned no usable title".into());
+    }
+    Ok(title)
+}
+
+/// Take a model's reply and squeeze a usable title out of it. Models pad with
+/// quotes, `Title:` prefixes, trailing periods, and reasoning blocks even when
+/// told not to — so the last non-empty line is the safest thing to trust.
+fn clean_title(raw: &str) -> String {
+    let without_think = match (raw.find("</think>"), raw.rfind("</think>")) {
+        (Some(_), Some(end)) => &raw[end + "</think>".len()..],
+        _ => raw,
+    };
+    let line = without_think
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .next_back()
+        .unwrap_or("");
+    let line = line
+        .trim_start_matches("**")
+        .trim_end_matches("**")
+        .trim()
+        .trim_start_matches(|c: char| c == '"' || c == '\'' || c == '“')
+        .trim_end_matches(|c: char| c == '"' || c == '\'' || c == '”' || c == '.');
+    let line = line
+        .strip_prefix("Title:")
+        .or_else(|| line.strip_prefix("title:"))
+        .unwrap_or(line)
+        .trim();
+    // Cap length so a model that ignores the word limit cannot blow up the rail.
+    let mut out: String = line.chars().take(70).collect();
+    if let Some(i) = out.rfind(char::is_whitespace) {
+        if out.chars().count() == 70 {
+            out.truncate(i);
+        }
+    }
+    out.trim().to_string()
+}
+
 /// Start a streaming generation on a worker thread. Deltas and completion are
 /// delivered as window events so the UI stays responsive.
 pub fn start_stream(
@@ -266,6 +361,34 @@ fn extract_delta(payload: &str) -> Option<(String, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cleans_up_model_titles() {
+        // Plain answer.
+        assert_eq!(clean_title("Todo app design"), "Todo app design");
+        // Padding models add despite instructions.
+        assert_eq!(clean_title("\"Todo app design\""), "Todo app design");
+        assert_eq!(clean_title("Title: Todo app design."), "Todo app design");
+        assert_eq!(clean_title("**Todo app design**"), "Todo app design");
+        // Reasoning models emit a think block, then the title.
+        assert_eq!(
+            clean_title("<think>weighing options</think>
+Todo app design"),
+            "Todo app design"
+        );
+        // Preamble lines before the answer: trust the last one.
+        assert_eq!(
+            clean_title("Sure, here is a title:
+Todo app design"),
+            "Todo app design"
+        );
+        // Runaway output is capped without cutting mid-word.
+        let long = clean_title(&"word ".repeat(40));
+        assert!(long.chars().count() <= 70);
+        assert!(!long.ends_with("wor"));
+        // Nothing usable.
+        assert_eq!(clean_title("   "), "");
+    }
 
     #[test]
     fn parses_sse_data_lines() {

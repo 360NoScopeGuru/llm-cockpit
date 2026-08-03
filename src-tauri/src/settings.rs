@@ -25,6 +25,11 @@ pub struct Settings {
     /// the user picks one.
     #[serde(default)]
     pub agent_workspace: Option<String>,
+    /// KV cache element type: "f16" (default), "q8_0" or "q4_0". Quantizing it
+    /// buys context on the same VRAM. Persisted because it must be identical
+    /// for the estimate and the launch, or the ladder lies.
+    #[serde(default)]
+    pub kv_cache_type: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -91,6 +96,18 @@ pub fn set_ui_scale(scale: f64) -> Result<Settings, String> {
     }
     let mut s = load();
     s.ui_scale = Some(scale);
+    save(&s)?;
+    Ok(s)
+}
+
+/// Persist the KV cache element type. Rejects anything llama.cpp would not
+/// accept, so a bad value can never reach the server's command line.
+pub fn set_kv_cache_type(kind: String) -> Result<Settings, String> {
+    if !matches!(kind.as_str(), "f16" | "q8_0" | "q4_0") {
+        return Err(format!("unsupported kv cache type: {kind}"));
+    }
+    let mut s = load();
+    s.kv_cache_type = Some(kind);
     save(&s)?;
     Ok(s)
 }

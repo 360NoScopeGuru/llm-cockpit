@@ -1,0 +1,63 @@
+name: Release
+
+# Builds a Windows installer and attaches it to a GitHub Release.
+#
+# This exists so that using Tokamak does not require a toolchain. Installing
+# Rust, Node and the Tauri prerequisites is fine for developing it, but it is a
+# ridiculous ask for someone who just wants to run the app — they get an .msi.
+#
+# Trigger: push a version tag (`git tag v0.1.0 && git push origin v0.1.0`),
+# or run it by hand from the Actions tab.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cargo's registry and the Rust build are by far the slowest steps;
+      # keying on the lockfile keeps repeat builds to a couple of minutes.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # Fail the release before building the installer, not after.
+      - name: Typecheck and build frontend
+        run: npm run build
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Build installer
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: Tokamak ${{ github.ref_name }}
+          releaseBody: |
+            Windows installer. No toolchain required — download the `.msi`, run it, done.
+
+            Needs an NVIDIA GPU (telemetry and benchmarking use NVML) and a
+            `llama-server` binary; if LM Studio is installed Tokamak finds its
+            bundled builds automatically.
+          releaseDraft: true
+          prerelease: false

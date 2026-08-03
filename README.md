@@ -101,6 +101,18 @@ A terminal-style chat drawer wired straight to the running server through the Ru
 
 ## Getting started
 
+### Just want to run it
+
+Grab the `.msi` from [Releases](https://github.com/360NoScopeGuru/tokamak/releases)
+and run it. No Rust, no Node, no toolchain — the installer is built by CI on
+every tagged version.
+
+You still need an NVIDIA GPU (telemetry and benchmarking use NVML), a
+`llama-server` binary (Tokamak finds LM Studio's bundled builds automatically),
+and some GGUF models on disk.
+
+### Building it yourself
+
 ### Prerequisites
 - Windows 10/11 with an NVIDIA GPU (telemetry and benchmarking use NVML).
 - Rust (stable) and Node.js 20+.

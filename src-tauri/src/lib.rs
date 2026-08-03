@@ -96,6 +96,12 @@ fn set_ui_scale(scale: f64) -> Result<settings::Settings, String> {
     settings::set_ui_scale(scale)
 }
 
+/// Persist the KV cache element type ("f16" | "q8_0" | "q4_0").
+#[tauri::command]
+fn set_kv_cache_type(kind: String) -> Result<settings::Settings, String> {
+    settings::set_kv_cache_type(kind)
+}
+
 /// Persist the agent workspace folder (None disables the agent).
 #[tauri::command]
 fn set_agent_workspace(dir: Option<String>) -> Result<settings::Settings, String> {
@@ -149,6 +155,16 @@ fn chat_send(
 #[tauri::command]
 fn chat_cancel(chat_state: State<'_, chat::ChatState>) {
     chat_state.cancel();
+}
+
+/// Ask the running model to name a session. Runs outside the streaming
+/// single-flight path so it cannot cancel a generation in progress.
+#[tauri::command]
+fn chat_title(llama: State<'_, LlamaManager>, transcript: String) -> Result<String, String> {
+    let base_url = llama
+        .base_url()
+        .ok_or("no model is running — launch one first")?;
+    chat::generate_title(&base_url, &transcript)
 }
 
 /// One live snapshot of GPU + system telemetry. Polled by the frontend.
@@ -260,12 +276,17 @@ fn estimate_config(
     let mut notes = Vec::new();
     let shape = estimator::shape_from_metadata(&md, file_size, &mut notes)
         .ok_or_else(|| "insufficient model metadata to estimate".to_string())?;
-    let mut est = estimator::estimate(&shape, gpu_total, gpu_free, notes);
+    // The KV cache type is a launch setting, and it changes how much context
+    // fits — so the estimate has to be made under the same setting the server
+    // will actually run with, or the ladder promises context that won't exist.
+    let kv = estimator::KvType::parse(settings::load().kv_cache_type.as_deref());
+    let mut est = estimator::estimate(&shape, gpu_total, gpu_free, kv, notes);
     est.quant_advice = estimator::quant_advice(
         &shape,
         md.quant_label.as_deref(),
         md.parameter_count,
         gpu_total,
+        kv,
     );
     Ok(est)
 }
@@ -318,6 +339,7 @@ pub fn run() {
             get_settings,
             set_preferred_binary,
             set_ui_scale,
+            set_kv_cache_type,
             set_agent_workspace,
             agent_list_dir,
             agent_read_file,
@@ -338,7 +360,8 @@ pub fn run() {
             benchmark_model,
             export_bench_report,
             chat_send,
-            chat_cancel
+            chat_cancel,
+            chat_title
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

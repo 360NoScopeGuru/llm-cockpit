@@ -64,6 +64,9 @@ interface TabState {
   turns: Turn[];
   input: string;
   loadedInfo: SessionInfo | null; // metadata from a reopened session
+  /// Model-written session name. Null until the first exchange completes, at
+  /// which point the raw first message is used as a placeholder.
+  title: string | null;
 }
 
 const emptyTab = (): TabState => ({
@@ -72,6 +75,7 @@ const emptyTab = (): TabState => ({
   turns: [],
   input: "",
   loadedInfo: null,
+  title: null,
 });
 
 interface DeltaEvent {
@@ -353,7 +357,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     const session: StoredSession = {
       id: t.id,
       kind: k,
-      title: (firstUser?.content ?? "(untitled)").slice(0, 80),
+      title: t.title ?? (firstUser?.content ?? "(untitled)").slice(0, 80),
       ...info,
       created_ms: t.createdMs || Date.now(),
       updated_ms: Date.now(),
@@ -640,6 +644,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
         // (CODE tab) look for a tool call to continue the loop.
         setTimeout(() => {
           persist(k);
+          nameSession(k);
           if (!e.payload.error && !e.payload.stopped) maybeRunToolLoop();
           else roundsRef.current = 0;
         }, 30);
@@ -743,6 +748,34 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     setTimeout(() => setCopied(false), 1200);
   }
 
+  /// Have the model name the session once the first exchange lands. Titles come
+  /// from a separate non-streaming request so this never disturbs generation,
+  /// and a failure is silent — the first-message fallback is still a title.
+  async function nameSession(k: TabKind) {
+    const t = tabsRef.current[k];
+    if (t.title || !t.id || !serverRef.current?.running) return;
+    const real = t.turns.filter((x) => x.kind !== "continue" && !x.error);
+    const user = real.find((x) => x.role === "user");
+    const reply = real.find((x) => x.role === "assistant" && x.content);
+    if (!user || !reply) return;
+    const transcript =
+      `User: ${user.content.slice(0, 1200)}\n\n` +
+      `Assistant: ${stripToolBlock(reply.content).slice(0, 1200)}`;
+    try {
+      const title = await invoke<string>("chat_title", { transcript });
+      if (!title) return;
+      // The tab may have been reset or reloaded while the title was in flight.
+      if (tabsRef.current[k].id !== t.id) return;
+      patchTab(k, (tab) => ({ ...tab, title }));
+      setTimeout(() => {
+        persist(k);
+        p.onSessionsChanged();
+      }, 0);
+    } catch {
+      /* keep the fallback title */
+    }
+  }
+
   // ---- sessions (list rendered by the left rail) ----
 
   async function loadSession(id: string) {
@@ -784,6 +817,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
           createdMs: s.created_ms,
           turns,
           input: "",
+          title: s.title || null,
           loadedInfo: {
             model_name: s.model_name ?? null,
             model_path: s.model_path ?? null,

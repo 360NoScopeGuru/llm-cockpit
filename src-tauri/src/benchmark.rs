@@ -16,6 +16,10 @@ use std::time::{Duration, Instant};
 use nvml_wrapper::Nvml;
 use serde::{Deserialize, Serialize};
 
+/// GPU memory is reported in GiB everywhere in this app, matching what the
+/// driver and the vendor mean by "GB" for VRAM.
+const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+
 use crate::llama::{LlamaManager, LlamaServerConfig};
 
 /// Dedicated port for benchmark server instances (distinct from the user's 8137).
@@ -264,7 +268,7 @@ pub fn export_report(gpu_name: &str, rows: &[ReportRow]) -> Result<String, Strin
             r.load_ms as f64 / 1000.0,
             r.prefill_tok_s,
             r.decode_tok_s,
-            r.peak_vram_bytes as f64 / 1e9,
+            r.peak_vram_bytes as f64 / GIB,
             rel,
         ));
     }
@@ -325,7 +329,7 @@ mod tests {
                 r.load_ms,
                 r.prefill_tok_s,
                 r.decode_tok_s,
-                r.peak_vram_bytes as f64 / 1e9,
+                r.peak_vram_bytes as f64 / GIB,
                 r.error.as_deref().unwrap_or(""),
             );
         });

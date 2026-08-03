@@ -4,6 +4,7 @@ import {
   ServerStatus,
   TelemetrySnapshot,
   VramEstimate,
+  BYTES_PER_GB,
   gb,
 } from "./types";
 
@@ -46,7 +47,8 @@ function RodBank({
   ghostBytes: number;
   ghostFits: boolean;
 }) {
-  const GB = 1e9;
+  // One rod per GiB, matching how the card's capacity is reported elsewhere.
+  const GB = BYTES_PER_GB;
   const rods = Math.min(32, Math.max(8, Math.round(totalBytes / GB)));
   const perRod = totalBytes / rods;
   const usedBytes = segments.reduce((s, x) => s + x.bytes, 0);
