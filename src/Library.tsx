@@ -26,6 +26,7 @@ interface LibraryProps {
   onBench: (m: ModelEntry) => void;
   onSuite: () => void;
   onRescan: () => void;
+  onGet: () => void;
   onAddFolder: () => void;
   onRemoveFolder: (dir: string) => void;
 }
@@ -47,6 +48,7 @@ function srcShort(r: ScanRoot): string {
   if (r.source === "huggingface") return "HF";
   if (r.source === "lm-studio") return "LM Studio";
   if (r.source === "ollama") return "Ollama";
+  if (r.source === "downloaded") return "Downloaded";
   const parts = r.path.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] ?? r.path;
 }
@@ -75,6 +77,9 @@ export function Library(p: LibraryProps) {
           title="Benchmark every model at its recommended config and rank them"
         >
           Bench All
+        </button>
+        <button onClick={p.onGet} title="download models from Hugging Face, a URL, or Ollama">
+          ↓ Get
         </button>
         <button onClick={p.onAddFolder}>+ Dir</button>
       </div>
