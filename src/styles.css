@@ -1729,6 +1729,31 @@ select:focus {
   color: var(--low);
 }
 
+/* KV cache precision picker — sits beside the UI scale control. */
+.kv-ctl {
+  display: inline-flex;
+  gap: 3px;
+  align-items: center;
+  color: var(--low);
+}
+.kv-ctl button {
+  padding: 0 7px;
+  font-size: 11px;
+  line-height: 16px;
+  border-color: var(--hair);
+  color: var(--low);
+}
+.kv-ctl button.on {
+  color: var(--plasma);
+  border-color: var(--plasma-deep);
+  background: var(--bg2);
+}
+.kv-ctl .kv-pending {
+  color: var(--faint);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+
 /* ------------------------------ toast ------------------------------ */
 
 .toast-error {

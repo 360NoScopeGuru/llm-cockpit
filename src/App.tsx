@@ -32,6 +32,16 @@ import "./styles.css";
 const PORT = 8137;
 const FLUX_WINDOW = 60;
 
+type KvType = "f16" | "q8_0" | "q4_0";
+/// Quantizing the KV cache trades a little cache precision for a lot of
+/// context. Effective sizes include llama.cpp's per-block scales, so q8_0 is
+/// 8.5 bpw rather than a clean half of f16's 16.
+const KV_TYPES: { id: KvType; label: string; hint: string }[] = [
+  { id: "f16", label: "f16", hint: "full precision — llama.cpp default" },
+  { id: "q8_0", label: "q8_0", hint: "~half the KV memory, ~2x context, negligible quality cost" },
+  { id: "q4_0", label: "q4_0", hint: "~quarter the KV memory, ~4x context, measurable quality cost" },
+];
+
 export default function App() {
   const [models, setModels] = useState<ModelEntry[]>([]);
   const [roots, setRoots] = useState<ScanRoot[]>([]);
@@ -71,6 +81,9 @@ export default function App() {
   const [binaries, setBinaries] = useState<LlamaBinary[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [scale, setScale] = useState(1);
+  // KV cache element type. Quantizing it is the cheapest context you can buy:
+  // the cache is the only VRAM term that scales with context length.
+  const [kvType, setKvType] = useState<KvType>("f16");
 
   const estimatesRef = useRef(estimates);
   estimatesRef.current = estimates;
@@ -108,9 +121,25 @@ export default function App() {
       .then((s) => {
         setSettings(s);
         if (s.ui_scale && s.ui_scale >= 0.5 && s.ui_scale <= 2.5) setScale(s.ui_scale);
+        setKvType(s.kv_cache_type === "q8_0" || s.kv_cache_type === "q4_0" ? s.kv_cache_type : "f16");
       })
       .catch(() => {});
   }, []);
+
+  /// Changing the KV type changes how much context fits, so every cached
+  /// estimate is stale — drop them and let the library re-estimate under the
+  /// new setting rather than showing a ladder the server won't honour.
+  async function pickKvType(kind: KvType) {
+    if (kind === kvType) return;
+    setKvType(kind);
+    try {
+      setSettings(await invoke<Settings>("set_kv_cache_type", { kind }));
+    } catch (e) {
+      setError(String(e));
+      return;
+    }
+    setEstimates(new Map());
+  }
 
   // ---- UI scaling (independent of the DPI corrector below: this is user
   // preference, applied as CSS zoom; the corrector fixes webview DPI bugs) ----
@@ -278,6 +307,11 @@ export default function App() {
         // just stops answering. Sliding the oldest turns out degrades far more
         // gracefully than refusing to generate.
         context_shift: true,
+        // Must match what the estimator assumed, or the context it promised
+        // will not actually fit. f16 is passed as null so the server keeps its
+        // own default rather than being handed a redundant flag.
+        cache_type_k: kvType === "f16" ? null : kvType,
+        cache_type_v: kvType === "f16" ? null : kvType,
       };
       const status = await invoke<ServerStatus>("llama_start", { config: cfg });
       setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size });
@@ -689,6 +723,22 @@ export default function App() {
             </option>
           ))}
         </select>
+        <span className="kv-ctl" title="KV cache precision — applies to the next ignition">
+          KV
+          {KV_TYPES.map((k) => (
+            <button
+              key={k.id}
+              className={kvType === k.id ? "on" : ""}
+              onClick={() => pickKvType(k.id)}
+              title={k.hint}
+            >
+              {k.label}
+            </button>
+          ))}
+          {kvType !== "f16" && server?.running && (
+            <span className="kv-pending">next ignition</span>
+          )}
+        </span>
         <span className="scale-ctl">
           UI {Math.round(scale * 100)}%
           <button onClick={() => bumpScale(-0.1)} title="Ctrl+- / Ctrl+wheel">

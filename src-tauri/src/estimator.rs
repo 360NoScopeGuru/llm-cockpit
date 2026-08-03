@@ -21,8 +21,48 @@ const VRAM_HEADROOM: f64 = 0.90;
 /// Flat allowance for llama.cpp's compute buffers + misc allocations.
 const OVERHEAD_BYTES: u64 = 400 * 1024 * 1024;
 
-/// f16 KV cache: 2 bytes per element (the llama.cpp default).
-const KV_ELEM_BYTES: u64 = 2;
+/// KV cache element type. Quantizing the cache is the cheapest way to buy
+/// context on fixed VRAM: the cache is the only term that scales with context
+/// length, so halving its element size roughly doubles the context that fits.
+///
+/// Sizes are llama.cpp's block formats, so they include per-block scale
+/// overhead: q8_0 packs 32 values into 34 bytes (8.5 bpw), q4_0 into 18 bytes
+/// (4.5 bpw). Held as bits×2 so the arithmetic stays exact in integers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KvType {
+    F16,
+    Q8_0,
+    Q4_0,
+}
+
+impl KvType {
+    fn bits_x2(self) -> u64 {
+        match self {
+            KvType::F16 => 32, // 16.0 bpw
+            KvType::Q8_0 => 17, // 8.5 bpw
+            KvType::Q4_0 => 9,  // 4.5 bpw
+        }
+    }
+
+    /// Parse the llama.cpp `-ctk`/`-ctv` spelling. Unknown values fall back to
+    /// f16 — the conservative choice, since it over-estimates rather than
+    /// promising context that will not fit.
+    pub fn parse(s: Option<&str>) -> Self {
+        match s.map(|v| v.trim().to_ascii_lowercase()).as_deref() {
+            Some("q8_0") => KvType::Q8_0,
+            Some("q4_0") => KvType::Q4_0,
+            _ => KvType::F16,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KvType::F16 => "f16",
+            KvType::Q8_0 => "q8_0",
+            KvType::Q4_0 => "q4_0",
+        }
+    }
+}
 
 /// Context to aim for when a model cannot be fully offloaded. Below this,
 /// agent runs and long documents fill the window mid-task; the layers traded
@@ -128,6 +168,7 @@ pub fn quant_advice(
     current_quant: Option<&str>,
     metadata_params: Option<u64>,
     gpu_total: u64,
+    kv_type: KvType,
 ) -> Option<QuantAdvice> {
     let current_bpw = current_quant.and_then(bpw_for);
     let params: f64 = match metadata_params {
@@ -142,7 +183,7 @@ pub fn quant_advice(
     let budget = (gpu_total as f64 * VRAM_HEADROOM) as u64;
     // Judge each quant at a practical working context (KV at 8K or native max).
     let ctx = 8192u64.min(shape.native_ctx);
-    let kv = kv_bytes(shape, ctx, shape.n_layers);
+    let kv = kv_bytes(shape, ctx, shape.n_layers, kv_type);
 
     let current_up = current_quant.map(|c| c.to_ascii_uppercase());
     let mut options = Vec::new();
@@ -264,18 +305,19 @@ pub fn shape_from_metadata(
     })
 }
 
-fn kv_bytes(shape: &ModelShape, ctx: u64, layers_on_gpu: u64) -> u64 {
+fn kv_bytes(shape: &ModelShape, ctx: u64, layers_on_gpu: u64, kv: KvType) -> u64 {
     layers_on_gpu
         .saturating_mul(ctx)
         .saturating_mul(shape.n_head_kv)
         .saturating_mul(shape.head_dim_k + shape.head_dim_v)
-        .saturating_mul(KV_ELEM_BYTES)
+        .saturating_mul(kv.bits_x2())
+        / 16
 }
 
 /// Most layers that fit on the GPU at a given context, 0 if none do.
-fn max_layers_at(shape: &ModelShape, ctx: u64, budget: u64) -> u64 {
+fn max_layers_at(shape: &ModelShape, ctx: u64, budget: u64, kv: KvType) -> u64 {
     for n in (0..=shape.n_layers).rev() {
-        if weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n) <= budget {
+        if weights_bytes(shape, n) + OVERHEAD_BYTES + kv_bytes(shape, ctx, n, kv) <= budget {
             return n;
         }
     }
@@ -291,7 +333,13 @@ fn weights_bytes(shape: &ModelShape, layers_on_gpu: u64) -> u64 {
 }
 
 /// Compute a recommendation for `shape` given the GPU's VRAM.
-pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Vec<String>) -> VramEstimate {
+pub fn estimate(
+    shape: &ModelShape,
+    gpu_total: u64,
+    gpu_free: u64,
+    kv: KvType,
+    mut notes: Vec<String>,
+) -> VramEstimate {
     let budget = (gpu_total as f64 * VRAM_HEADROOM) as u64;
 
     let candidates: Vec<u32> = CANDIDATE_CTX
@@ -311,12 +359,12 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         .iter()
         .map(|&ctx| {
             let total =
-                weights_full + OVERHEAD_BYTES + kv_bytes(shape, ctx as u64, shape.n_layers);
+                weights_full + OVERHEAD_BYTES + kv_bytes(shape, ctx as u64, shape.n_layers, kv);
             ContextOption {
                 ctx,
                 est_total_bytes: total,
                 fits: total <= budget,
-                n_gpu_layers: max_layers_at(shape, ctx as u64, budget)
+                n_gpu_layers: max_layers_at(shape, ctx as u64, budget, kv)
                     .min(u32::MAX as u64) as u32,
             }
         })
@@ -324,7 +372,7 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
 
     // Prefer full offload at the largest context that fits.
     if let Some(best) = context_options.iter().filter(|o| o.fits).max_by_key(|o| o.ctx) {
-        let kv = kv_bytes(shape, best.ctx as u64, shape.n_layers);
+        let kv = kv_bytes(shape, best.ctx as u64, shape.n_layers, kv);
         return VramEstimate {
             fits: true,
             full_offload: true,
@@ -352,7 +400,7 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
         .into_iter()
         .map(|c| c.min(shape.native_ctx))
         .filter(|&c| c > 0)
-        .map(|c| (c, max_layers_at(shape, c, budget)))
+        .map(|c| (c, max_layers_at(shape, c, budget, kv)))
         .find(|&(_, layers)| layers > 0)
         .unwrap_or((4096u64.min(shape.native_ctx).max(1), 0));
 
@@ -373,15 +421,15 @@ pub fn estimate(shape: &ModelShape, gpu_total: u64, gpu_free: u64, mut notes: Ve
     }
 
     let weights = weights_bytes(shape, best_layers);
-    let kv = kv_bytes(shape, ctx, best_layers);
-    let total = weights + OVERHEAD_BYTES + kv;
+    let kv_b = kv_bytes(shape, ctx, best_layers, kv);
+    let total = weights + OVERHEAD_BYTES + kv_b;
     VramEstimate {
         fits: best_layers > 0,
         full_offload: false,
         n_gpu_layers: best_layers.min(u32::MAX as u64) as u32,
         ctx_size: ctx as u32,
         est_weights_bytes: weights,
-        est_kv_bytes: kv,
+        est_kv_bytes: kv_b,
         est_overhead_bytes: OVERHEAD_BYTES,
         est_total_bytes: total,
         budget_bytes: budget,
@@ -412,7 +460,7 @@ mod tests {
     #[test]
     fn full_offload_on_a_big_gpu() {
         // 24 GB GPU easily fits a 4.3 GB 7B model; should recommend full offload.
-        let est = estimate(&shape_7b(), 24 * 1_000_000_000, 22 * 1_000_000_000, vec![]);
+        let est = estimate(&shape_7b(), 24 * 1_000_000_000, 22 * 1_000_000_000, KvType::F16, vec![]);
         assert!(est.fits);
         assert!(est.full_offload);
         assert_eq!(est.n_gpu_layers, 32);
@@ -422,8 +470,8 @@ mod tests {
 
     #[test]
     fn larger_gpu_allows_larger_context() {
-        let small = estimate(&shape_7b(), 8 * 1_000_000_000, 8 * 1_000_000_000, vec![]);
-        let big = estimate(&shape_7b(), 24 * 1_000_000_000, 24 * 1_000_000_000, vec![]);
+        let small = estimate(&shape_7b(), 8 * 1_000_000_000, 8 * 1_000_000_000, KvType::F16, vec![]);
+        let big = estimate(&shape_7b(), 24 * 1_000_000_000, 24 * 1_000_000_000, KvType::F16, vec![]);
         assert!(big.ctx_size >= small.ctx_size);
     }
 
@@ -438,7 +486,7 @@ mod tests {
             head_dim_v: 128,
             native_ctx: 32768,
         };
-        let advice = quant_advice(&shape, Some("F16"), Some(14_000_000_000), 16_000_000_000)
+        let advice = quant_advice(&shape, Some("F16"), Some(14_000_000_000), 16_000_000_000, KvType::F16)
             .expect("advice");
         assert!(!advice.current_fits, "F16 14B must not fit in 16GB");
         let rec = advice.recommended.expect("some quant should fit");
@@ -464,7 +512,7 @@ mod tests {
             native_ctx: 32768,
         };
         let advice =
-            quant_advice(&shape, Some("Q4_K_M"), Some(4_000_000_000), 16_000_000_000).unwrap();
+            quant_advice(&shape, Some("Q4_K_M"), Some(4_000_000_000), 16_000_000_000, KvType::F16).unwrap();
         assert!(advice.current_fits);
         let rec = advice.recommended.unwrap();
         assert!(
@@ -484,7 +532,7 @@ mod tests {
             head_dim_v: 128,
             native_ctx: 8192,
         };
-        let advice = quant_advice(&shape, Some("Q4_K_M"), None, 24_000_000_000).unwrap();
+        let advice = quant_advice(&shape, Some("Q4_K_M"), None, 24_000_000_000, KvType::F16).unwrap();
         assert!((advice.est_params_b - 8.0).abs() < 0.5, "~8B expected, got {}", advice.est_params_b);
     }
 
@@ -493,7 +541,7 @@ mod tests {
         // A 40 GB model on an 8 GB GPU can't fully offload.
         let mut shape = shape_7b();
         shape.file_size = 40_000_000_000;
-        let est = estimate(&shape, 8 * 1_000_000_000, 8 * 1_000_000_000, vec![]);
+        let est = estimate(&shape, 8 * 1_000_000_000, 8 * 1_000_000_000, KvType::F16, vec![]);
         assert!(!est.full_offload);
         assert!(est.n_gpu_layers < shape.n_layers as u32);
     }
@@ -547,7 +595,7 @@ mod tests {
             let Some(shape) = shape_from_metadata(&md, file_size, &mut notes) else {
                 continue;
             };
-            let est = estimate(&shape, gpu_total, gpu_free, notes);
+            let est = estimate(&shape, gpu_total, gpu_free, KvType::F16, notes);
             let name = path.file_name().unwrap().to_string_lossy();
             println!("{name}  ({:.1} GB, {} layers)", gb(file_size), shape.n_layers);
             println!(
@@ -589,7 +637,7 @@ mod ladder {
     #[test]
     fn partial_rungs_report_usable_layers() {
         // 27B Q4_K_M on a 17.1 GB card: never fully offloads.
-        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, vec![]);
+        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, KvType::F16, vec![]);
         assert!(!est.full_offload);
         assert!(est.context_options.iter().all(|o| !o.fits));
         // ...yet every rung up to a large context still runs partially.
@@ -608,7 +656,7 @@ mod ladder {
     /// always landed at 4K however much room a few fewer layers would buy.
     #[test]
     fn partial_offload_targets_a_usable_context() {
-        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, vec![]);
+        let est = estimate(&shape(16_500_000_000, 64), 17_100_000_000, 17_100_000_000, KvType::F16, vec![]);
         assert_eq!(est.ctx_size, 8192);
         assert!(est.n_gpu_layers > 0 && est.n_gpu_layers < 64);
     }
@@ -617,8 +665,67 @@ mod ladder {
     /// largest context, not get dragged down by the partial-path target.
     #[test]
     fn small_model_still_fully_offloads_at_a_large_context() {
-        let est = estimate(&shape(4_700_000_000, 28), 17_100_000_000, 17_100_000_000, vec![]);
+        let est = estimate(&shape(4_700_000_000, 28), 17_100_000_000, 17_100_000_000, KvType::F16, vec![]);
         assert!(est.full_offload);
         assert!(est.ctx_size >= 32_768, "got {}", est.ctx_size);
+    }
+}
+
+#[cfg(test)]
+mod kv_quant {
+    use super::*;
+
+    fn shape_27b() -> ModelShape {
+        ModelShape {
+            file_size: 16_500_000_000,
+            n_layers: 64,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 262_144,
+        }
+    }
+
+    #[test]
+    fn quantized_kv_costs_proportionally_less() {
+        let s = shape_27b();
+        let f16 = kv_bytes(&s, 8192, 64, KvType::F16);
+        let q8 = kv_bytes(&s, 8192, 64, KvType::Q8_0);
+        let q4 = kv_bytes(&s, 8192, 64, KvType::Q4_0);
+        // 8.5 and 4.5 bpw against 16 — block scales included, so not exactly
+        // half and a quarter.
+        assert_eq!(q8, f16 * 17 / 32);
+        assert_eq!(q4, f16 * 9 / 32);
+        assert!(q8 < f16 && q4 < q8);
+    }
+
+    /// The point of the feature: the same card holds more context.
+    #[test]
+    fn quantized_kv_buys_layers_and_context() {
+        let s = shape_27b();
+        let gpu = 17_100_000_000;
+        let f16 = estimate(&s, gpu, gpu, KvType::F16, vec![]);
+        let q8 = estimate(&s, gpu, gpu, KvType::Q8_0, vec![]);
+
+        let layers_at = |e: &VramEstimate, c: u32| {
+            e.context_options.iter().find(|o| o.ctx == c).unwrap().n_gpu_layers
+        };
+        // At any given context, quantized KV leaves room for more layers.
+        assert!(layers_at(&q8, 16384) > layers_at(&f16, 16384));
+        assert!(layers_at(&q8, 32768) > layers_at(&f16, 32768));
+        // And the KV term itself is smaller at the chosen config.
+        assert!(q8.est_kv_bytes < f16.est_kv_bytes);
+    }
+
+    #[test]
+    fn parses_and_round_trips_names() {
+        assert_eq!(KvType::parse(Some("q8_0")), KvType::Q8_0);
+        assert_eq!(KvType::parse(Some("Q4_0")), KvType::Q4_0);
+        assert_eq!(KvType::parse(Some("f16")), KvType::F16);
+        // Unknown/absent must fall back to f16 so we never promise context
+        // that the server will not actually have room for.
+        assert_eq!(KvType::parse(Some("nonsense")), KvType::F16);
+        assert_eq!(KvType::parse(None), KvType::F16);
+        assert_eq!(KvType::Q8_0.as_str(), "q8_0");
     }
 }
