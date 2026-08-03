@@ -110,6 +110,15 @@ export function Downloads(p: DownloadsProps) {
     invoke<string>("downloads_dir").then(setDir).catch(() => {});
   }, []);
 
+  // The close button advertises Esc, so Esc has to work.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") p.onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [p.onClose]);
+
   // StrictMode-safe: the effect can run twice, so ignore a listener that
   // resolves after teardown.
   useEffect(() => {
@@ -220,7 +229,9 @@ export function Downloads(p: DownloadsProps) {
             → {dir}
           </span>
         )}
-        <button onClick={p.onClose}>✕</button>
+        <button className="dl-close" onClick={p.onClose} title="close (Esc)">
+          ✕ Close
+        </button>
       </div>
 
       {error && <div className="dl-error">⚠ {error}</div>}

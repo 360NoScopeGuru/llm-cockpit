@@ -1786,6 +1786,28 @@ select:focus {
 
 /* ------------------------- model downloads ------------------------- */
 
+/* The bare ✕ sat almost invisible against the header hairline. Give it the
+   plasma accent and a real hit area so it reads as the way out. */
+.dl-close {
+  font: 600 11.5px var(--mono);
+  letter-spacing: 0.1em;
+  padding: 5px 13px;
+  color: var(--plasma);
+  border: 1px solid var(--plasma-deep);
+  background: var(--bg2);
+  border-radius: 3px;
+  flex: none;
+}
+.dl-close:hover {
+  color: var(--bg0);
+  background: var(--plasma);
+  border-color: var(--plasma);
+}
+.dl-close:focus-visible {
+  outline: 2px solid var(--plasma);
+  outline-offset: 2px;
+}
+
 .downloads .dl-dir {
   font: 10px var(--mono);
   color: var(--faint);
