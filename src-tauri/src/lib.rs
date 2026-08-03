@@ -4,6 +4,7 @@ mod estimator;
 mod gguf;
 mod history;
 mod llama;
+mod ollama;
 mod scanner;
 mod settings;
 mod telemetry;

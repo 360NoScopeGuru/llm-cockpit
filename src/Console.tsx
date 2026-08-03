@@ -152,19 +152,33 @@ function stripToolBlock(content: string): string {
   return content.replace(/```tool\s*\n?[\s\S]*?```\s*$/, "").trimEnd();
 }
 
+/// Blank, 0 or negative all mean "no cap": the field is omitted from the
+/// request so the server falls back to its own n_predict = -1 (unlimited).
+function capOf(v: string): number | null {
+  const n = parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 function metaLine(
   tokens?: number | null,
   rate?: number | null,
   stopped?: boolean | null,
-  finish?: string | null
+  finish?: string | null,
+  /// The max-tokens cap in force for this turn, or null when it was unlimited.
+  cap?: number | null
 ) {
   if (tokens == null || rate == null) return undefined;
-  // An answer that ends early must say so. Silence here is what made
-  // truncation feel like a random bug rather than a limit being hit.
+  // `finish: "length"` covers two different causes and the fix differs, so
+  // name the actual one. Telling someone to "raise max" when max is already ∞
+  // sends them to a setting that cannot help.
+  const cutOff =
+    cap != null
+      ? ` · ⚠ CUT OFF at the ${cap} token max — raise max`
+      : " · ⚠ CUT OFF — context window full, not a token cap";
   const why = stopped
     ? " · stopped by you"
     : finish === "length"
-      ? " · ⚠ CUT OFF — raise max, or the context is full"
+      ? cutOff
       : finish == null
         ? " · ⚠ stream ended early"
         : "";
@@ -326,12 +340,6 @@ export function Console(p: ConsoleProps) {
       const n = parseInt(v, 10);
       return Number.isFinite(n) ? n : undefined;
     };
-    // Blank, 0 or a negative all mean "no cap" — omit the field entirely so the
-    // server falls back to n_predict = -1 rather than being handed a limit.
-    const cap = (v: string) => {
-      const n = parseInt(v, 10);
-      return Number.isFinite(n) && n > 0 ? n : undefined;
-    };
     try {
       await invoke("chat_send", {
         id,
@@ -341,7 +349,7 @@ export function Console(p: ConsoleProps) {
           top_k: int(s.topK),
           top_p: num(s.topP),
           min_p: num(s.minP),
-          max_tokens: cap(s.maxTok),
+          max_tokens: capOf(s.maxTok) ?? undefined,
         },
       });
     } catch (e) {
@@ -525,7 +533,8 @@ export function Console(p: ConsoleProps) {
                     e.payload.tokens,
                     e.payload.decode_tok_s,
                     e.payload.stopped,
-                    e.payload.finish
+                    e.payload.finish,
+                    capOf(samplerRef.current.maxTok)
                   ),
             };
           }
