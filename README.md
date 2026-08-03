@@ -13,7 +13,7 @@ Tokamak is a Windows desktop app for people who run large language models on the
 
 A tokamak is the machine that holds a fusion reaction inside a magnetic ring. That is roughly the job here: contain a model that wants all of your VRAM, keep it stable, and get useful work out of it. The name also happens to start with "tok", which is the only unit anyone here cares about.
 
-> Status: v0.1.1, Windows + NVIDIA first. Built with Tauri 2 (Rust) and React.
+> Status: v0.1.2, Windows + NVIDIA first. Built with Tauri 2 (Rust) and React.
 
 ---
 
