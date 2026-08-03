@@ -2,6 +2,13 @@
 
 **A reactor room for your local LLMs.**
 
+[![Release](https://img.shields.io/github/v/release/360NoScopeGuru/tokamak?style=flat-square&color=eda03f&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/360NoScopeGuru/tokamak/release.yml?style=flat-square&color=86b95e&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/actions)
+[![License](https://img.shields.io/badge/license-MPL--2.0-b8ac9d?style=flat-square&labelColor=1a1614)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%2B%20NVIDIA-948878?style=flat-square&labelColor=1a1614)](#install)
+
+![Tokamak running a model](docs/img/cockpit.png)
+
 Tokamak is a Windows desktop app for people who run large language models on their own hardware and want to actually see and control what is happening. It finds the GGUF models you already have, works out the best way to run each one on your GPU, launches them through llama.cpp, and turns the whole thing into a live instrument panel: VRAM, utilization, temperature, power, tokens per second, and KV cache pressure, all animated in real time.
 
 A tokamak is the machine that holds a fusion reaction inside a magnetic ring. That is roughly the job here: contain a model that wants all of your VRAM, keep it stable, and get useful work out of it. The name also happens to start with "tok", which is the only unit anyone here cares about.
@@ -71,77 +78,64 @@ Tokamak is built around three ideas:
 
 ## Features
 
-### The Hangar: your model library
-- Scans the standard Hugging Face hub cache (`HF_HOME` respected), LM Studio's model folders, and any custom folders you add through the native folder picker. Added folders persist across restarts.
-- Parses GGUF headers directly (v2 and v3): architecture, quantization, native context length, layer count, attention geometry, parameter count.
-- Understands multi-file models: split shards (`-00001-of-00003`) collapse into a single entry, and multimodal projector files (`mmproj-*`) show up as a VISION badge on their parent model instead of cluttering the list.
-- Every model card shows a live fit verdict for your GPU: FITS with the max context, partial offload with the exact layer split, or CPU ONLY.
+| | |
+|---|---|
+| **Model library** | Reads the caches you already have — Hugging Face, LM Studio, Ollama — plus any folder you add. Plain GGUF, no proprietary store |
+| **Download models in-app** | Search Hugging Face, paste a URL, or drive `ollama pull` — with a fit verdict *before* you download |
+| **Hardware-aware auto-config** | Computes GPU layers and context from the model's real attention shape, and shows the arithmetic |
+| **Quant advisor** | Which quant you *should have downloaded* for this GPU |
+| **KV cache quantization** | f16 / q8_0 / q4_0 — roughly double the context for the same VRAM |
+| **Live telemetry** | VRAM as fuel rods, 60 s flux trace, KV containment alert |
+| **Chat + agent tabs** | Separate transcripts; the agent gets sandboxed workspace tools behind an approval gate |
+| **Sessions** | Every turn persisted with full detail, named by the model, in plain JSON |
+| **Measured benchmarks** | Actually runs the model and reports real numbers |
 
-### Hardware-aware auto-config
-For each model, Tokamak computes the best launch configuration for *your* GPU:
+<details>
+<summary><b>The quant advisor and context ladder</b></summary>
 
-- Weights cost is derived from the file size and the offloaded layer fraction.
-- KV cache cost is computed from the model's real attention shape: `layers x context x kv_heads x (key_len + value_len) x 2 bytes`.
-- A fixed allowance covers llama.cpp compute buffers, and 10 percent of VRAM is held back for the desktop and driver.
+![Containment budget, context ladder and quant advisor](docs/img/advisor.png)
 
-The result is either full offload at the largest context that fits, or the maximum number of GPU layers at a working context. The config panel shows the VRAM budget breakdown (weights / KV / overhead) and a context ladder telling you exactly which context sizes fit at full offload.
+The VRAM budget broken into weights / KV cache / overhead / headroom, a context
+ladder showing how many layers fit at each context size, and the whole GGUF
+quant ladder judged against your card with the sweet spot marked.
 
-### The quant advisor
-The answer to "which file should I download?". For the selected model, Tokamak evaluates the whole GGUF quantization ladder (F16 down to Q2_K, using effective bits per weight) against your VRAM, including KV cache at a practical context, and tells you the sweet spot:
+Bigger context costs GPU layers — the ladder makes that trade explicit instead
+of leaving you to guess.
 
-> F16 won't fully fit, get Q4_K_M (4.2 GB headroom)
+</details>
 
-Each rung shows the estimated weight size and remaining headroom, with your current file marked.
+<details>
+<summary><b>Downloading models, with fit shown first</b></summary>
 
-### Ignition and live telemetry: the Control Rod panel
-Press IGNITE and Tokamak launches `llama-server` with the recommended (or your chosen) settings, then renders the machine as a warm-graphite instrument panel where a single plasma-amber hue always means energy and load:
+![Hugging Face search with per-quant fit verdicts](docs/img/downloads.png)
 
-- **Rod bank:** VRAM as fuel rods, one rod per GB. While a model runs the rods segment into weights, KV cache in use, and KV reserved. Hovering any model in the library projects its estimated footprint as dashed ghost rods, so you can see whether it fits *before* launching.
-- **Flux trace:** the last 60 seconds of decode rate, GPU utilization, and temperature as scrolling heat strips; brightness is the value.
-- **KV containment alert:** at 90 percent cache fill the third strip flips to a red KV pressure trace, a banner drops into the console, and the rail's KV box pulses. Your context is nearly full and you can see it happening.
-- **Decode headline:** live tok/s in 42px numerals, with prefill rate and total tokens.
-- **Session timeline:** every turn of the conversation as a block sized by tokens, laid against the context ceiling.
-- The rail also carries RAM, CPU, GPU temperature, power draw against its limit, and core/memory clocks, polled at 1 Hz.
+Search Hugging Face from inside the app. Every quant in a repo is listed with
+its size and a verdict for *your* GPU, so you find out a 17 GB file will not
+fit **before** downloading it rather than after.
 
-### Agent mode
-Arm AGENT in the console and grant a workspace folder, and the running model gets Claude Code style abilities inside that folder:
+Downloads resume if interrupted, and land as plain `.gguf` files in a folder
+the scanner already watches.
 
-- `list_dir` and `read_file` run automatically so the model can explore the project.
-- `write_file` and `run_command` (PowerShell) stop at an approval card; nothing destructive happens without your click.
-- Every tool is sandboxed to the workspace you granted. Path escapes (`..`, absolute paths, symlink tricks) are rejected in the Rust backend, not just hidden in the UI.
-- The loop continues until the model answers without requesting a tool, with a hard cap per task so a confused model cannot spin forever.
+</details>
 
-### Console comforts
-- Model output renders as markdown: headers, bold, lists, tables, fenced code with language tags. Rendering builds React elements directly, never raw HTML, so model output cannot inject anything into the app.
-- Reasoning models stream their thinking into a collapsible section that folds away once the answer starts.
-- UI scale control in the status bar, plus Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+scroll, persisted across restarts.
+<details>
+<summary><b>Agent mode</b></summary>
 
-Binary resolution is automatic: LM Studio's bundled llama.cpp builds are discovered and ranked (CUDA 12 above CUDA above Vulkan above CPU), with `llama-server` on your PATH as a fallback. You can pin a specific binary in the header. The CUDA runtime DLLs that LM Studio keeps in a separate vendor folder are injected into the child process search path automatically.
+A CODE tab separate from CHAT. The model gets four workspace-sandboxed tools:
+`list_dir` and `read_file` run automatically, `write_file` and `run_command`
+stop at an APPROVE / DENY card.
 
-### Measured benchmarks
-Estimates are predictions; BENCH is proof. For any model, Tokamak launches real server instances on a dedicated port, loads the model at candidate configs (for example full offload versus a third of the layers), generates a fixed 96 token workload with `ignore_eos`, and reports:
+The sandbox is enforced in Rust with lexical and canonical path checks, unit
+tested against traversal. If the model stops early mid-task — which llama.cpp
+reports as an ordinary completion — the agent notices and pushes it to
+continue instead of quitting silently.
 
-- real prefill and decode tok/s, computed from token counts and elapsed time (llama.cpp's own per-second fields can overflow on near-zero timings, so Tokamak does the division itself),
-- load time,
-- peak VRAM, sampled from NVML at 10 Hz during the run.
-
-On an RTX 5080 Laptop GPU this is what surfaced the offload cliff: the same 4B model at 137.8 tok/s fully offloaded versus 18.8 tok/s at partial offload. That cliff is exactly what the estimator exists to protect you from.
-
-### The benchmark suite
-SUITE benches *every* model in your hangar at its recommended config, one after another, and renders a comparative bar chart in the rail as results stream in. Models that will not fit are skipped with the reason shown. One click exports a Markdown report to `Documents\tokamak`, complete with a "vs best" column, ready to paste into a gist or a Reddit argument.
-
-### The Console
-A terminal-style chat drawer wired straight to the running server through the Rust backend (no CORS, no browser tab):
-
-- Streaming output with a live token count and measured decode rate per reply.
-- Reasoning models are handled properly: thinking deltas (`reasoning_content`) render dimmed and separate from the final answer.
-- Sampler controls per message: temperature, top-k, top-p, min-p, max tokens, and a system prompt.
-- STOP cancels generation mid-stream.
-- The header shows the OpenAI-compatible endpoint (`http://127.0.0.1:8137/v1`) with a copy button, so you can point any other client at the same server. Note that the server root URL intentionally serves no web page; the API lives under `/v1`, and this console is the UI.
-
----
+</details>
 
 ## Architecture
+
+<details>
+<summary>How it fits together</summary>
 
 ```
 src-tauri/src/
@@ -177,6 +171,8 @@ Design notes:
 - **Process hygiene matters.** The server manager kills its child on drop, so a crash, a panicking test, or closing the app never leaves an orphaned `llama-server` squatting on your VRAM.
 - **All HTTP lives in Rust.** The webview never talks to the model server directly, which avoids CORS entirely and keeps one code path for streaming, health, and metrics.
 
+</details>
+
 ## Roadmap
 
 - Sampler presets and per-message settings provenance
@@ -188,4 +184,12 @@ Design notes:
 
 ## License
 
-Not yet chosen (all rights reserved while in early development).
+[Mozilla Public License 2.0](LICENSE).
+
+File-level copyleft: if you modify Tokamak's own source files and distribute
+the result, those files stay open. You are free to combine it with proprietary
+code, ship it commercially, and build on it — what you cannot do is take the
+improvements private.
+
+It is the middle ground between MIT (anyone may close it) and GPL (everything
+touching it must open), and it matches what this project claims to be.

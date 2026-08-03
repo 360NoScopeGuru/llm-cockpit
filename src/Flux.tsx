@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 // Flux trace: 60 s of telemetry drawn as heat strips — brightness is the
 // value. Newest sample lands at the right edge; history slides left. The
 // third strip swaps from TEMP to KV pressure while containment is in alert.

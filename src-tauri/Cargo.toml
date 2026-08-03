@@ -4,6 +4,7 @@ version = "0.1.1"
 description = "Tokamak: a reactor room for local LLMs. Model library, hardware-aware auto-config, measured benchmarks, live telemetry."
 authors = ["vamsh <vamsheedharan@gmail.com>"]
 edition = "2021"
+license = "MPL-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
