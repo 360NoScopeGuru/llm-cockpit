@@ -2,6 +2,7 @@ mod benchmark;
 mod chat;
 mod estimator;
 mod gguf;
+mod history;
 mod llama;
 mod scanner;
 mod settings;
@@ -62,6 +63,30 @@ fn get_settings() -> settings::Settings {
 #[tauri::command]
 fn set_preferred_binary(path: Option<String>) -> Result<settings::Settings, String> {
     settings::set_preferred_binary(path)
+}
+
+/// List saved chat/code sessions, newest first.
+#[tauri::command]
+fn history_list() -> Result<Vec<history::SessionMeta>, String> {
+    history::list()
+}
+
+/// Load one saved session in full.
+#[tauri::command]
+fn history_get(id: String) -> Result<history::Session, String> {
+    history::get(&id)
+}
+
+/// Upsert a session (the frontend saves after every completed turn).
+#[tauri::command]
+fn history_save(session: history::Session) -> Result<(), String> {
+    history::save(&session)
+}
+
+/// Delete a saved session.
+#[tauri::command]
+fn history_delete(id: String) -> Result<(), String> {
+    history::delete(&id)
 }
 
 /// Persist the user's UI zoom factor.
@@ -297,6 +322,10 @@ pub fn run() {
             agent_read_file,
             agent_write_file,
             agent_run_command,
+            history_list,
+            history_get,
+            history_save,
+            history_delete,
             gpu_telemetry,
             true_client_size,
             llama_binaries,

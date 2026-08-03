@@ -424,6 +424,82 @@ select:focus {
   padding: 0 14px;
   border-bottom: 1px solid var(--hair2);
 }
+.tab-bar {
+  display: inline-flex;
+  gap: 4px;
+}
+.tab-btn {
+  padding: 4px 14px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+.tab-btn.active {
+  color: var(--bg0);
+  background: var(--plasma);
+  border-color: var(--plasma);
+}
+.tab-btn.active:hover {
+  color: var(--bg0);
+}
+.turn-ts {
+  color: var(--faint);
+  font-weight: 400;
+  letter-spacing: 0.02em;
+  text-transform: none;
+}
+.hist-row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--hair3);
+  cursor: pointer;
+  flex: none;
+}
+.hist-row:hover {
+  background: var(--bg2);
+}
+.hist-kind {
+  font: 600 9.5px var(--mono);
+  letter-spacing: 0.1em;
+  border: 1px solid var(--hair-strong);
+  border-radius: 2px;
+  padding: 2px 7px;
+  color: var(--mid);
+  flex: none;
+}
+.hist-kind.code {
+  color: var(--plasma);
+  border-color: var(--plasma-deep);
+}
+.hist-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.hist-title {
+  font: 12.5px var(--mono);
+  color: var(--hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist-detail {
+  font: 10.5px var(--mono);
+  color: var(--low);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.hist-date {
+  font: 10.5px var(--mono);
+  color: var(--faint);
+  white-space: nowrap;
+  flex: none;
+}
+
 .console-model {
   font: 11px var(--mono);
   color: var(--hi);
@@ -504,11 +580,19 @@ select:focus {
 .transcript {
   flex: 1;
   overflow-y: auto;
-  padding: 14px 18px;
+  padding: 14px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
   user-select: text;
+}
+/* Use the whole pane: content column is capped for readability but centered,
+   so a wide window doesn't leave the right half dead. */
+.transcript > * {
+  width: 100%;
+  max-width: 920px;
+  margin-left: auto;
+  margin-right: auto;
 }
 .turn-label {
   font: 600 9.5px var(--mono);
@@ -523,7 +607,6 @@ select:focus {
 .turn-body {
   font: 14px/1.65 var(--ui);
   color: var(--hi-dim);
-  max-width: 780px;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -538,7 +621,6 @@ select:focus {
 }
 .thinking-box {
   margin-bottom: 8px;
-  max-width: 780px;
 }
 .thinking-box summary {
   font: 600 10.5px var(--mono);
@@ -701,7 +783,6 @@ select:focus {
   background: var(--bg2);
   border-radius: 3px;
   padding: 8px 12px;
-  max-width: 780px;
   margin-top: 6px;
 }
 .tool-card summary {
@@ -1383,10 +1464,9 @@ select:focus {
 .flux-row .tag.alert {
   color: var(--danger);
 }
-.flux-row canvas {
+.flux-row .strip {
   flex: 1;
   height: 18px;
-  display: block;
   background: var(--bg1);
   border: 1px solid var(--hair3);
 }
