@@ -9,6 +9,7 @@ import { Rail, Ghost } from "./Rail";
 import { Dock } from "./Dock";
 import { Console, ConsoleHandle, StagedIgnite } from "./Console";
 import { Sessions } from "./Sessions";
+import { Downloads } from "./Downloads";
 import { FluxSample } from "./Flux";
 import {
   BenchResult,
@@ -84,6 +85,7 @@ export default function App() {
   // KV cache element type. Quantizing it is the cheapest context you can buy:
   // the cache is the only VRAM term that scales with context length.
   const [kvType, setKvType] = useState<KvType>("f16");
+  const [getOpen, setGetOpen] = useState(false);
 
   const estimatesRef = useRef(estimates);
   estimatesRef.current = estimates;
@@ -593,7 +595,13 @@ export default function App() {
     stateText = "COLD · NO REACTOR LIT";
   }
 
-  const board = suite ? (
+  const board = getOpen ? (
+    <Downloads
+      vramTotal={telemetry?.gpus?.[0]?.vram_total_bytes ?? null}
+      onClose={() => setGetOpen(false)}
+      onDownloaded={rescan}
+    />
+  ) : suite ? (
     <SuiteBoard
       suite={suite}
       onClose={() => setSuite(null)}
@@ -640,6 +648,7 @@ export default function App() {
           onBench={runBench}
           onSuite={runSuite}
           onRescan={rescan}
+          onGet={() => setGetOpen(true)}
           onAddFolder={addFolder}
           onRemoveFolder={removeFolder}
         />

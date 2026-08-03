@@ -66,6 +66,15 @@ pub fn default_roots() -> Vec<(PathBuf, String)> {
         ));
     }
 
+    // Tokamak's own download folder. Registered here rather than as a user
+    // folder so in-app downloads show up in the library with no extra step.
+    if let Some(config) = dirs::config_dir() {
+        roots.push((
+            config.join("tokamak").join("models"),
+            "downloaded".into(),
+        ));
+    }
+
     dedupe_roots(roots)
 }
 

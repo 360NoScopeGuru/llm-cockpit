@@ -1,5 +1,6 @@
 mod benchmark;
 mod chat;
+mod downloads;
 mod estimator;
 mod gguf;
 mod history;
@@ -155,6 +156,73 @@ fn chat_send(
 #[tauri::command]
 fn chat_cancel(chat_state: State<'_, chat::ChatState>) {
     chat_state.cancel();
+}
+
+/// Search Hugging Face for GGUF repos.
+#[tauri::command]
+fn hf_search(query: String) -> Result<Vec<downloads::HfModel>, String> {
+    downloads::search(&query, settings::load().hf_token.as_deref())
+}
+
+/// List the GGUF files (with sizes) in a Hugging Face repo.
+#[tauri::command]
+fn hf_files(repo: String) -> Result<Vec<downloads::HfFile>, String> {
+    downloads::list_files(&repo, settings::load().hf_token.as_deref())
+}
+
+/// Which download sources are usable on this machine.
+#[tauri::command]
+fn download_sources() -> serde_json::Value {
+    serde_json::json!({
+        "huggingface": true,
+        "url": true,
+        "ollama": downloads::ollama_available(),
+    })
+}
+
+/// Where downloaded models land.
+#[tauri::command]
+fn downloads_dir() -> Result<String, String> {
+    downloads::models_dir().map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Start a download. `source` is "huggingface" | "url" | "ollama".
+#[tauri::command]
+fn download_start(
+    window: tauri::Window,
+    state: State<'_, downloads::DownloadState>,
+    id: u64,
+    source: String,
+    repo: Option<String>,
+    file: Option<String>,
+    url: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
+    match source.as_str() {
+        "huggingface" => downloads::start_hf(
+            window,
+            &state,
+            id,
+            repo.ok_or("missing repo")?,
+            file.ok_or("missing file")?,
+            settings::load().hf_token,
+        ),
+        "url" => downloads::start_url(window, &state, id, url.ok_or("missing url")?),
+        "ollama" => downloads::start_ollama(window, &state, id, model.ok_or("missing model")?),
+        other => Err(format!("unknown download source: {other}")),
+    }
+}
+
+/// Cancel an in-flight download (partial data is kept so it can resume).
+#[tauri::command]
+fn download_cancel(state: State<'_, downloads::DownloadState>, id: u64) {
+    state.cancel(id);
+}
+
+/// Persist a Hugging Face token for gated repos (None clears it).
+#[tauri::command]
+fn set_hf_token(token: Option<String>) -> Result<settings::Settings, String> {
+    settings::set_hf_token(token)
 }
 
 /// Ask the running model to name a session. Runs outside the streaming
@@ -331,6 +399,7 @@ pub fn run() {
         .manage(TelemetryState::new())
         .manage(LlamaManager::new())
         .manage(chat::ChatState::default())
+        .manage(downloads::DownloadState::default())
         .invoke_handler(tauri::generate_handler![
             scan_models,
             scan_roots,
@@ -361,7 +430,14 @@ pub fn run() {
             export_bench_report,
             chat_send,
             chat_cancel,
-            chat_title
+            chat_title,
+            hf_search,
+            hf_files,
+            download_sources,
+            downloads_dir,
+            download_start,
+            download_cancel,
+            set_hf_token
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

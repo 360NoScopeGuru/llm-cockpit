@@ -1783,3 +1783,178 @@ select:focus {
 .eased {
   transition: width 0.65s cubic-bezier(0.3, 0.9, 0.3, 1);
 }
+
+/* ------------------------- model downloads ------------------------- */
+
+/* The bare ✕ sat almost invisible against the header hairline. Give it the
+   plasma accent and a real hit area so it reads as the way out. */
+.dl-close {
+  font: 600 11.5px var(--mono);
+  letter-spacing: 0.1em;
+  padding: 5px 13px;
+  color: var(--plasma);
+  border: 1px solid var(--plasma-deep);
+  background: var(--bg2);
+  border-radius: 3px;
+  flex: none;
+}
+.dl-close:hover {
+  color: var(--bg0);
+  background: var(--plasma);
+  border-color: var(--plasma);
+}
+.dl-close:focus-visible {
+  outline: 2px solid var(--plasma);
+  outline-offset: 2px;
+}
+
+.downloads .dl-dir {
+  font: 10px var(--mono);
+  color: var(--faint);
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-body {
+  padding: 14px 18px;
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+.dl-search {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.dl-search input {
+  flex: 1;
+  font: 12.5px var(--mono);
+  padding: 8px 10px;
+  background: var(--bg0);
+  border: 1px solid var(--hair);
+  border-radius: 3px;
+  color: var(--hi);
+}
+.dl-search input:focus {
+  outline: none;
+  border-color: var(--plasma-deep);
+}
+.dl-hint,
+.dl-empty {
+  font: 11.5px var(--mono);
+  color: var(--low);
+  line-height: 1.6;
+  padding: 6px 0;
+}
+.dl-error {
+  margin: 0 18px;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: 3px;
+  color: var(--danger);
+  font: 11.5px var(--mono);
+}
+.dl-repo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 6px;
+  border-bottom: 1px solid var(--hair3);
+  cursor: pointer;
+}
+.dl-repo:hover {
+  background: var(--bg2);
+}
+.dl-caret {
+  color: var(--faint);
+  width: 10px;
+}
+.dl-repo-id {
+  font: 12.5px var(--mono);
+  color: var(--hi);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dl-meta {
+  font: 10.5px var(--mono);
+  color: var(--faint);
+  white-space: nowrap;
+}
+.chip.gated {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.dl-files {
+  padding: 4px 0 10px 22px;
+  border-bottom: 1px solid var(--hair3);
+}
+.dl-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 4px;
+}
+.dl-file:hover {
+  background: var(--bg2);
+}
+.dl-quant {
+  font: 600 10px var(--mono);
+  letter-spacing: 0.08em;
+  color: var(--plasma);
+  min-width: 58px;
+}
+.dl-name {
+  font: 11.5px var(--mono);
+  color: var(--hi-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.dl-size {
+  font: 11px var(--mono);
+  color: var(--mid);
+  white-space: nowrap;
+  min-width: 66px;
+  text-align: right;
+}
+
+.dl-jobs {
+  border-top: 1px solid var(--hair);
+  padding: 12px 18px 16px;
+  max-height: 40%;
+  overflow-y: auto;
+}
+.dl-job {
+  padding: 7px 0;
+  border-bottom: 1px solid var(--hair3);
+}
+.dl-job-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.dl-bar {
+  height: 4px;
+  background: var(--bg3);
+  border-radius: 2px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+.dl-bar span {
+  display: block;
+  height: 100%;
+  background: var(--plasma);
+  transition: width 0.25s linear;
+}
+.dl-ok {
+  color: var(--good);
+  font: 11px var(--mono);
+}
+.dl-fail {
+  color: var(--danger);
+  font: 11px var(--mono);
+}

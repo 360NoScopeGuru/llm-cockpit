@@ -30,6 +30,10 @@ pub struct Settings {
     /// for the estimate and the launch, or the ladder lies.
     #[serde(default)]
     pub kv_cache_type: Option<String>,
+    /// Hugging Face access token, only needed for gated repos (Llama, Gemma…).
+    /// Downloads of public models never use it.
+    #[serde(default)]
+    pub hf_token: Option<String>,
 }
 
 fn settings_path() -> Option<PathBuf> {
@@ -108,6 +112,14 @@ pub fn set_kv_cache_type(kind: String) -> Result<Settings, String> {
     }
     let mut s = load();
     s.kv_cache_type = Some(kind);
+    save(&s)?;
+    Ok(s)
+}
+
+/// Persist a Hugging Face token (None clears it). Only used for gated repos.
+pub fn set_hf_token(token: Option<String>) -> Result<Settings, String> {
+    let mut s = load();
+    s.hf_token = token.filter(|t| !t.trim().is_empty());
     save(&s)?;
     Ok(s)
 }
