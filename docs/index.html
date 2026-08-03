@@ -184,6 +184,32 @@
   }
   details.src summary:hover{color:var(--plasma)}
   details.src p{color:var(--low);font-size:14px;margin:14px 0 0}
+
+  /* screenshots */
+  .shot{margin:0;border:1px solid var(--hair);border-radius:5px;overflow:hidden;background:var(--bg0)}
+  .shot img{display:block;width:100%;height:auto}
+  .hero-shot{margin-top:52px;box-shadow:0 24px 70px rgba(0,0,0,.55)}
+  .cell .shot{margin:4px 0 14px}
+  .grid > .cell.wide{grid-column:1 / -1}
+
+  /* measured-numbers strip */
+  .stats{
+    display:grid;grid-template-columns:repeat(4,1fr);gap:1px;margin-top:1px;
+    background:var(--hair);border:1px solid var(--hair);border-top:0;
+    border-radius:0 0 5px 5px;overflow:hidden;
+  }
+  .stats > div{background:var(--bg1);padding:18px 20px;min-width:0}
+  .stats b{display:block;font:600 24px var(--mono);color:var(--plasma);letter-spacing:-.01em}
+  .stats span{display:block;margin-top:5px;color:var(--low);font-size:12.5px;line-height:1.5}
+  @media(max-width:900px){.stats{grid-template-columns:1fr 1fr}}
+  @media(max-width:480px){.stats{grid-template-columns:1fr}}
+
+  /* comparison table */
+  table.cmp td,table.cmp th{white-space:nowrap}
+  table.cmp td.k{white-space:normal;color:var(--hi-dim)}
+  table.cmp .y{color:var(--good)}
+  table.cmp .n{color:var(--faint)}
+  table.cmp .p{color:var(--warn)}
   footer{padding:44px 0 60px;color:var(--faint);font-size:13.5px}
   footer .row{display:flex;gap:22px;flex-wrap:wrap;align-items:center}
   footer .sp{margin-left:auto}
@@ -225,42 +251,17 @@
     <a class="btn ghost" href="https://github.com/360NoScopeGuru/tokamak">Source on GitHub</a>
   </div>
 
-  <div class="panel" role="img" aria-label="Stylised depiction of the Tokamak instrument panel: decode rate, flux trace heat strips, and a VRAM rod bank.">
-    <div class="panel-head">
-      <span class="live">&#9679; REACTOR LIVE</span>
-      <span>QWEN3.6-27B &middot; 51/64 LAYERS &middot; 8K CTX</span>
-    </div>
-    <div class="panel-body">
-      <div>
-        <div class="metric-lbl">DECODE</div>
-        <div class="decode">13.0<small>tok/s</small></div>
-        <div class="sub-metric">prefill 296 tok/s &middot; total 7,940 tok</div>
-        <div class="metric-lbl" style="margin-top:26px">ROD BANK &middot; VRAM</div>
-        <div class="rods">
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod" style="height:100%"></div><div class="rod" style="height:100%"></div>
-          <div class="rod kv" style="height:74%"></div><div class="rod kv" style="height:52%"></div>
-          <div class="rod free" style="height:26%"></div>
-        </div>
-        <div class="rod-foot">weights 14.0 &middot; kv 0.9 &middot; ovh 0.4 GB &middot; 1 rod &asymp; 1 GB</div>
-      </div>
-      <div>
-        <div class="metric-lbl">FLUX TRACE &middot; 60 s</div>
-        <div class="flux-row"><span class="tag">DECODE</span><span class="strip s1"></span></div>
-        <div class="flux-row"><span class="tag">UTIL</span><span class="strip s2"></span></div>
-        <div class="flux-row"><span class="tag">TEMP</span><span class="strip s3"></span></div>
-        <div class="sub-metric" style="margin-top:18px">
-          GPU 98&#37; &middot; 56 &deg;C &middot; 9 / 175 W<br>
-          KV cache 7,940 / 8,192 tok
-        </div>
-      </div>
-    </div>
+  <figure class="shot hero-shot">
+    <img src="img/cockpit.png" alt="Tokamak running a model: fuel library, chat transcript, and live telemetry rail at 141.6 tok/s" loading="eager" width="1600" height="736">
+  </figure>
+
+  <div class="stats">
+    <div><b>141.6</b><span>tok/s decode, 4B on a 5080 Laptop</span></div>
+    <div><b>2.31 GiB</b><span>saved by q8_0 KV at 32K context</span></div>
+    <div><b>16K &rarr; 64K</b><span>context a 14B reaches as KV quantizes</span></div>
+    <div><b>4 MiB</b><span>installer &mdash; no bundled browser</span></div>
   </div>
+</div>
 </div>
 
 <section id="install">
@@ -283,12 +284,17 @@
         <span class="ic">&#9881;</span>
         <span class="t">What you also need</span>
         <span class="d">
-          An <b>NVIDIA GPU</b> (telemetry and benchmarking use NVML), and a
-          <code>llama-server</code> binary &mdash; found automatically if LM Studio
-          is installed, otherwise put llama.cpp&rsquo;s on your PATH.
+          An <b>NVIDIA GPU</b> &mdash; telemetry and benchmarking use NVML.
+          That is the only hard requirement.
         </span>
         <span class="d">
-          Models are optional: Tokamak reads your existing Hugging Face,
+          <b>No separate inference runtime to install.</b> On first run Tokamak
+          offers to fetch the right llama.cpp build for your GPU and manages it
+          itself &mdash; and uses LM Studio&rsquo;s binaries automatically if you
+          already have them.
+        </span>
+        <span class="d">
+          Models are optional too: it reads your existing Hugging Face,
           LM Studio and Ollama caches, and can download new ones itself.
         </span>
       </div>
@@ -354,6 +360,15 @@
     <div class="eyebrow">WHAT IT DOES</div>
     <h2>An instrument panel, not a chat box.</h2>
     <div class="grid">
+      <div class="cell wide">
+        <h3><span class="ic">&#11015;</span>Download models, fit shown first</h3>
+        <figure class="shot"><img src="img/downloads.png" alt="Hugging Face search inside Tokamak, each quant marked FITS, TIGHT or TOO BIG for this GPU" loading="lazy" width="1400" height="498"></figure>
+        <p>
+          Search the hub from inside the app. Every quant is judged against
+          <em>your</em> card before a byte moves &mdash; so a 17 GB file that will
+          not fit says so first, not after the download.
+        </p>
+      </div>
       <div class="cell">
         <h3><span class="ic">&#9636;</span>The model library</h3>
         <p>
@@ -378,8 +393,9 @@
           you can trade speed for context deliberately instead of guessing.
         </p>
       </div>
-      <div class="cell">
-        <h3><span class="ic">&#9670;</span>The quant advisor</h3>
+      <div class="cell wide">
+        <h3><span class="ic">&#9670;</span>The quant advisor &amp; context ladder</h3>
+        <figure class="shot"><img src="img/advisor.png" alt="VRAM budget, context ladder with layer counts, and the quant ladder with the sweet spot marked" loading="lazy" width="1600" height="220"></figure>
         <p>
           The answer to &ldquo;which file should I download?&rdquo;. Evaluates the whole
           GGUF ladder (F16 down to Q2_K, by effective bits-per-weight) against your
@@ -424,6 +440,33 @@
         </p>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="compare">
+  <div class="wrap">
+    <div class="eyebrow">HOW IT COMPARES</div>
+    <h2>Where Tokamak wins, and where it doesn&rsquo;t.</h2>
+    <div class="scroll-x">
+      <table class="cmp">
+        <tr><th></th><th>Tokamak</th><th>LM Studio</th><th>Ollama</th></tr>
+        <tr><td class="k">Fit verdict before download</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td class="k">Shows the VRAM arithmetic</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td class="k">KV cache quantization in the UI</td><td class="y">yes</td><td class="p">flags</td><td class="n">no</td></tr>
+        <tr><td class="k">Live GPU + inference telemetry</td><td class="y">yes</td><td class="p">partial</td><td class="n">no</td></tr>
+        <tr><td class="k">Measured benchmarks in-app</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+        <tr><td class="k">Reads other tools&rsquo; model caches</td><td class="y">HF, LM Studio, Ollama</td><td class="p">own + HF</td><td class="n">own store</td></tr>
+        <tr><td class="k">Open source</td><td class="y">MPL-2.0</td><td class="n">proprietary</td><td class="y">MIT</td></tr>
+        <tr><td class="k">macOS / Linux</td><td class="n">not yet</td><td class="y">yes</td><td class="y">yes</td></tr>
+        <tr><td class="k">Signed installer</td><td class="n">unsigned</td><td class="y">yes</td><td class="y">yes</td></tr>
+        <tr><td class="k">Maturity</td><td class="n">v0.1</td><td class="y">mature</td><td class="y">mature</td></tr>
+      </table>
+    </div>
+    <p class="note-line">
+      Tokamak is v0.1 by one person. It is better than both at explaining your
+      hardware, and worse than both at everything that comes from years of
+      polish and a signing certificate.
+    </p>
   </div>
 </section>
 

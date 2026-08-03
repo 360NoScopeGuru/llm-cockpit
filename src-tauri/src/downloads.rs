@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 //! In-app model downloads.
 //!
 //! Three sources, all landing as plain GGUF files in a folder the scanner
@@ -334,7 +338,7 @@ fn spawn_stream(
 
 /// Core download loop. Takes a progress callback rather than a `Window` so it
 /// can be exercised in tests without a running Tauri app.
-fn stream_to_disk(
+pub(crate) fn stream_to_disk(
     on_progress: &dyn Fn(u64, u64, f64),
     url: &str,
     dest: &Path,

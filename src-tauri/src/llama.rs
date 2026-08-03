@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 //! `llama-server` process manager.
 //!
 //! Resolves a llama.cpp `llama-server` binary (preferring a CUDA build), launches
@@ -452,6 +456,31 @@ const EXE: &str = if cfg!(windows) {
 /// All `llama-server` binaries we can find, best-ranked first.
 pub fn resolve_binaries() -> Vec<LlamaBinary> {
     let mut found: Vec<LlamaBinary> = Vec::new();
+
+    // Tokamak's own managed runtime, if the user has installed one. Ranked
+    // above LM Studio's: it was chosen for this machine on purpose.
+    if let Some(exe) = crate::runtime::installed_binary() {
+        // The archive unpacks into a folder called "runtime", which says
+        // nothing about the backend — use the id recorded at install time.
+        // classify_backend reads the trailing dash-segment as a version, so
+        // feed it "<backend>-<release tag>" to get "Vulkan b10242" not "Vulkan vulkan".
+        let hint = match (
+            crate::runtime::installed_backend(),
+            crate::runtime::status().version,
+        ) {
+            (Some(b), Some(v)) => format!("{b}-{v}"),
+            (Some(b), None) => b,
+            _ => "unknown".into(),
+        };
+        let (rank, backend, label) = classify_backend(&hint);
+        found.push(LlamaBinary {
+            path: exe.to_string_lossy().into_owned(),
+            label: format!("{label} (managed)"),
+            backend,
+            source: "managed".into(),
+            rank: rank + 100,
+        });
+    }
 
     // LM Studio bundles per-backend builds under extensions/backends/<name>/.
     if let Some(home) = dirs::home_dir() {

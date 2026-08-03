@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 /* ============================================================
    TOKAMAK — "CONTROL ROD" design system
    Warm-graphite instrument panel: annealed blacks, one plasma
@@ -1957,4 +1961,29 @@ select:focus {
 .dl-fail {
   color: var(--danger);
   font: 11px var(--mono);
+}
+
+/* Managed-runtime prompt: only visible when no llama-server exists at all. */
+.runtime-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 16px;
+  border-bottom: 1px solid var(--plasma-deep);
+  background: var(--bg2);
+  flex-wrap: wrap;
+}
+.runtime-bar .rt-title {
+  font: 600 11px var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--plasma);
+}
+.runtime-bar .rt-sub {
+  font: 11.5px var(--mono);
+  color: var(--low);
+}
+.runtime-bar .rt-prog {
+  font: 11.5px var(--mono);
+  color: var(--plasma);
 }

@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -32,6 +36,15 @@ import "./styles.css";
 
 const PORT = 8137;
 const FLUX_WINDOW = 60;
+
+interface RuntimeBuild {
+  id: string;
+  label: string;
+  note: string;
+  assets: string[];
+  total_bytes: number;
+  recommended: boolean;
+}
 
 type KvType = "f16" | "q8_0" | "q4_0";
 /// Quantizing the KV cache trades a little cache precision for a lot of
@@ -86,6 +99,11 @@ export default function App() {
   // the cache is the only VRAM term that scales with context length.
   const [kvType, setKvType] = useState<KvType>("f16");
   const [getOpen, setGetOpen] = useState(false);
+  // Managed llama.cpp runtime: offered when no binary can be found, so nobody
+  // has to install LM Studio just to get an inference backend.
+  const [rtBuilds, setRtBuilds] = useState<RuntimeBuild[] | null>(null);
+  const [rtBusy, setRtBusy] = useState<string | null>(null);
+  const [rtProgress, setRtProgress] = useState<{ stage: string; received: number; total: number } | null>(null);
 
   const estimatesRef = useRef(estimates);
   estimatesRef.current = estimates;
@@ -127,6 +145,53 @@ export default function App() {
       })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let un: (() => void) | undefined;
+    listen<{ stage: string; received: number; total: number; done: boolean; error: string | null }>(
+      "runtime-progress",
+      (e) => {
+        const p = e.payload;
+        setRtProgress({ stage: p.stage, received: p.received, total: p.total });
+        if (p.done) {
+          setRtBusy(null);
+          setRtProgress(null);
+          if (p.error) setError(p.error);
+          else {
+            // A new binary changes what can be launched — refresh both.
+            invoke<LlamaBinary[]>("llama_binaries").then(setBinaries).catch(() => {});
+            setRtBuilds(null);
+          }
+        }
+      }
+    ).then((u) => (disposed ? u() : (un = u)));
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
+
+  async function loadRuntimeOptions() {
+    setError(null);
+    try {
+      setRtBuilds(await invoke<RuntimeBuild[]>("runtime_options"));
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
+  async function installRuntime(b: RuntimeBuild) {
+    setRtBusy(b.id);
+    setRtProgress({ stage: "starting", received: 0, total: b.total_bytes });
+    try {
+      await invoke("runtime_install", { build: b });
+    } catch (e) {
+      setError(String(e));
+      setRtBusy(null);
+      setRtProgress(null);
+    }
+  }
 
   /// Changing the KV type changes how much context fits, so every cached
   /// estimate is stale — drop them and let the library re-estimate under the
@@ -629,6 +694,40 @@ export default function App() {
           </button>
         )}
       </header>
+
+      {binaries.length === 0 && (
+        <div className="runtime-bar">
+          <span className="rt-title">No inference runtime found</span>
+          <span className="rt-sub">
+            Tokamak can fetch the right llama.cpp build for your GPU and manage it
+            itself &mdash; nothing else to install.
+          </span>
+          <span className="spacer" />
+          {rtProgress ? (
+            <span className="rt-prog">
+              {rtProgress.stage}
+              {rtProgress.total > 0 &&
+                ` · ${gb(rtProgress.received, 1)} / ${gb(rtProgress.total, 1)} GB`}
+            </span>
+          ) : rtBuilds ? (
+            rtBuilds.map((b) => (
+              <button
+                key={b.id}
+                className={b.recommended ? "primary" : ""}
+                disabled={!!rtBusy}
+                title={b.note}
+                onClick={() => installRuntime(b)}
+              >
+                {b.label} · {gb(b.total_bytes, b.total_bytes > 1e9 ? 1 : 2)} GB
+              </button>
+            ))
+          ) : (
+            <button className="primary" onClick={loadRuntimeOptions}>
+              Find builds
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="deck">
         <div className="rail-left">
