@@ -6,7 +6,49 @@ Tokamak is a Windows desktop app for people who run large language models on the
 
 A tokamak is the machine that holds a fusion reaction inside a magnetic ring. That is roughly the job here: contain a model that wants all of your VRAM, keep it stable, and get useful work out of it. The name also happens to start with "tok", which is the only unit anyone here cares about.
 
-> Status: v0.1, Windows + NVIDIA first. Built with Tauri 2 (Rust) and React.
+> Status: v0.1.1, Windows + NVIDIA first. Built with Tauri 2 (Rust) and React.
+
+---
+
+## Install
+
+**[⬇ Download the latest installer](https://github.com/360NoScopeGuru/tokamak/releases/latest)** — run the `.msi`, done.
+
+No Rust, no Node, no toolchain. Installers are built by CI on every tagged version.
+
+Windows will warn that the publisher is unknown, because the build is unsigned:
+choose **More info → Run anyway**.
+
+### What you also need
+
+| | |
+|---|---|
+| **GPU** | NVIDIA — telemetry and benchmarking use NVML |
+| **A `llama-server` binary** | Found automatically if LM Studio is installed; otherwise put llama.cpp's on your PATH |
+| **Models** | Optional. Tokamak reads your existing Hugging Face / LM Studio / Ollama caches, and can download new ones itself |
+
+<details>
+<summary><b>Building from source instead</b></summary>
+
+Needs Rust (stable) and Node.js 20+.
+
+```bash
+git clone https://github.com/360NoScopeGuru/tokamak
+cd tokamak
+npm install
+npm run tauri dev      # run in development
+npm run tauri build    # build a release
+```
+
+Tests:
+
+```bash
+cd src-tauri
+cargo test                            # unit tests
+cargo test -- --ignored --nocapture   # hardware tests (launch real models)
+```
+
+</details>
 
 ---
 
@@ -96,48 +138,6 @@ A terminal-style chat drawer wired straight to the running server through the Ru
 - Sampler controls per message: temperature, top-k, top-p, min-p, max tokens, and a system prompt.
 - STOP cancels generation mid-stream.
 - The header shows the OpenAI-compatible endpoint (`http://127.0.0.1:8137/v1`) with a copy button, so you can point any other client at the same server. Note that the server root URL intentionally serves no web page; the API lives under `/v1`, and this console is the UI.
-
----
-
-## Getting started
-
-### Just want to run it
-
-Grab the `.msi` from [Releases](https://github.com/360NoScopeGuru/tokamak/releases)
-and run it. No Rust, no Node, no toolchain — the installer is built by CI on
-every tagged version.
-
-You still need an NVIDIA GPU (telemetry and benchmarking use NVML), a
-`llama-server` binary (Tokamak finds LM Studio's bundled builds automatically),
-and some GGUF models on disk.
-
-### Building it yourself
-
-### Prerequisites
-- Windows 10/11 with an NVIDIA GPU (telemetry and benchmarking use NVML).
-- Rust (stable) and Node.js 20+.
-- A `llama-server` binary. If LM Studio is installed, Tokamak finds its bundled builds automatically. Otherwise put llama.cpp's `llama-server` on your PATH.
-- Some GGUF models on disk (LM Studio cache, HF cache, or any folder).
-
-### Run in development
-```
-git clone https://github.com/360NoScopeGuru/tokamak
-cd tokamak
-npm install
-npm run tauri dev
-```
-
-### Build a release
-```
-npm run tauri build
-```
-
-### Tests
-```
-cd src-tauri
-cargo test                            # unit tests
-cargo test -- --ignored --nocapture   # hardware integration tests (launch real models)
-```
 
 ---
 
