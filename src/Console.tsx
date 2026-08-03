@@ -33,7 +33,7 @@ type TabKind = "chat" | "code";
 
 interface Turn {
   role: "user" | "assistant";
-  kind?: "chat" | "tool-result";
+  kind?: "chat" | "tool-result" | "continue";
   toolName?: string;
   content: string;
   thinking?: string;
@@ -156,7 +156,23 @@ Rules:
 - Paths are relative to the workspace; you cannot access anything outside it.
 - Make at most ONE tool call per reply. After the tool block, stop and wait — the result arrives in the next message tagged [tool result].
 - Work step by step: inspect before you edit, verify after you change.
-- When the task is done (or no tool is needed), reply normally with no tool block.`;
+
+NEVER paste file contents into your reply. Writing code in chat produces
+nothing on disk, burns the context window, and the work is lost. To create or
+change a file you MUST use write_file. A reply that describes code without a
+write_file block has accomplished nothing.
+
+Keep going until the task is actually finished. Do not stop after planning,
+after describing what you will do, or after one file when more are needed.
+End EVERY reply one of exactly two ways:
+  1. a \`\`\`tool block — you are continuing, or
+  2. the single line TASK COMPLETE — everything is written and verified.
+If you end any other way you will be asked to continue.`;
+
+/// The agent's explicit end-of-work marker. Without one, a reply that merely
+/// stops is indistinguishable from a reply that finished — which is how the
+/// agent used to quit halfway through and look like it had crashed.
+const DONE_MARKER = /^\s*(TASK COMPLETE|\*\*TASK COMPLETE\*\*)\s*\.?\s*$/im;
 
 function parseToolCall(content: string): ToolCall | null {
   const matches = [...content.matchAll(/```tool\s*\n?([\s\S]*?)```/g)];
@@ -263,6 +279,16 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   const igniting = !!server?.running && (health === "starting" || health === "loading");
   const fault = !!server?.error && !ready && !igniting;
   const cur = tabs[tab];
+  const lastTurn = cur.turns[cur.turns.length - 1];
+  const canContinue =
+    ready &&
+    !streaming &&
+    !toolBusy &&
+    !pendingTool &&
+    !!lastTurn &&
+    lastTurn.role === "assistant" &&
+    !lastTurn.error &&
+    !!lastTurn.content;
 
   // ---- per-tab state helpers ----
 
@@ -279,7 +305,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   function toStored(t: Turn): StoredTurn {
     return {
       role: t.role,
-      kind: t.kind === "tool-result" ? "tool-result" : null,
+      kind: t.kind === "tool-result" || t.kind === "continue" ? t.kind : null,
       tool_name: t.toolName ?? null,
       content: t.content,
       thinking: t.thinking ?? null,
@@ -481,7 +507,28 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     if (!last || last.role !== "assistant" || last.error || !last.content) return;
     const call = parseToolCall(last.content);
     if (!call) {
-      roundsRef.current = 0;
+      // No tool block. Either the agent is genuinely done, or it stopped
+      // mid-task — which llama.cpp reports as an ordinary EOS (truncated = 0),
+      // so nothing downstream can tell the difference. Treat only the explicit
+      // marker as done and nudge otherwise, instead of silently giving up.
+      if (DONE_MARKER.test(last.content) || last.stopped) {
+        roundsRef.current = 0;
+        return;
+      }
+      if (roundsRef.current >= MAX_TOOL_ROUNDS) {
+        roundsRef.current = 0;
+        return;
+      }
+      roundsRef.current += 1;
+      continueWith({
+        role: "user",
+        kind: "continue",
+        content:
+          "You stopped without finishing. Continue from exactly where you left off. " +
+          "Use write_file to put code on disk — do not paste it here. " +
+          "End with a tool block, or with TASK COMPLETE if everything is written.",
+        ts: Date.now(),
+      });
       return;
     }
     if (roundsRef.current >= MAX_TOOL_ROUNDS) {
@@ -587,6 +634,28 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
 
   // ---- actions ----
 
+  /// Resume a reply the model ended on its own. A model that emits EOS early
+  /// is indistinguishable from one that finished, so this is a manual escape
+  /// hatch for both tabs — the CODE tab also nudges itself automatically.
+  function continueGen() {
+    const k = tab;
+    if (!ready || streaming || toolBusy || pendingTool) return;
+    const next: Turn[] = [
+      ...tabsRef.current[k].turns,
+      {
+        role: "user",
+        kind: "continue",
+        content:
+          "Continue from exactly where you left off. Do not restart or repeat " +
+          "what you already wrote.",
+        ts: Date.now(),
+      },
+      { role: "assistant", content: "", ts: Date.now() },
+    ];
+    patchTab(k, (t) => ({ ...t, turns: next }));
+    dispatch(k, next);
+  }
+
   async function send() {
     const k = tab;
     const t = tabs[k];
@@ -657,7 +726,10 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       const kind: TabKind = s.kind === "code" ? "code" : "chat";
       const turns: Turn[] = s.turns.map((st) => ({
         role: st.role === "user" ? "user" : "assistant",
-        kind: st.kind === "tool-result" ? "tool-result" : undefined,
+        kind:
+          st.kind === "tool-result" || st.kind === "continue"
+            ? (st.kind as "tool-result" | "continue")
+            : undefined,
         toolName: st.tool_name ?? undefined,
         content: st.content,
         thinking: st.thinking ?? undefined,
@@ -756,6 +828,15 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   function renderTurn(t: Turn, i: number, all: Turn[]) {
     const isLast = i === all.length - 1;
     const mine = streamTab.current === tab;
+    if (t.kind === "continue") {
+      // Shown as a thin marker rather than a full user turn — it is bookkeeping,
+      // not something the user said.
+      return (
+        <div key={i} className="continue-mark">
+          ▸ continued — the model had stopped early
+        </div>
+      );
+    }
     if (t.kind === "tool-result") {
       return (
         <details key={i} className="tool-card result">
@@ -837,6 +918,14 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
           </span>
         ) : (
           <span className="api-chip offline">api offline</span>
+        )}
+        {canContinue && (
+          <button
+            onClick={continueGen}
+            title="the model stopped on its own — pick up where it left off"
+          >
+            ▸ Continue
+          </button>
         )}
         {cur.turns.length > 0 && (
           <button onClick={newSession} disabled={streaming} title="start a fresh session (this one stays in history)">

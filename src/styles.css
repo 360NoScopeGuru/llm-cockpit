@@ -320,6 +320,14 @@ select:focus {
   border-top: 1px solid var(--hair2);
   min-height: 0;
 }
+.continue-mark {
+  font: 10.5px var(--mono);
+  color: var(--low);
+  letter-spacing: 0.06em;
+  padding: 6px 0 4px;
+  border-top: 1px dashed var(--hair2);
+  margin-top: 4px;
+}
 .sessions-empty {
   padding: 16px 12px;
   font: 11px var(--mono);
