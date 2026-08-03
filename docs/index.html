@@ -11,26 +11,40 @@
 <meta name="theme-color" content="#141110">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#9883;</text></svg>">
 <style>
+  /* Self-hosted variable fonts — the page makes zero external requests, which
+     is the whole point of a tool that promises no telemetry and no cloud. */
+  @font-face{font-family:"Space Grotesk";src:url("fonts/SpaceGrotesk.woff2") format("woff2");
+    font-weight:500 700;font-style:normal;font-display:swap}
+  @font-face{font-family:"Inter";src:url("fonts/Inter.woff2") format("woff2");
+    font-weight:400 600;font-style:normal;font-display:swap}
+  @font-face{font-family:"JetBrains Mono";src:url("fonts/JetBrainsMono.woff2") format("woff2");
+    font-weight:400 600;font-style:normal;font-display:swap}
+
   :root{
     --bg0:#141110; --bg1:#1a1614; --bg2:#221c19; --bg3:#2a2320;
     --hair:#332b26; --hair2:#2a2320; --hair3:#241e1b;
     --hi:#f2ebdf; --hi-dim:#e4dbcc; --mid:#b8ac9d; --low:#948878; --faint:#6b6052;
     --plasma:#eda03f; --plasma-deep:#8a5a20; --plasma-soft:#c07f2e;
     --good:#7bbf6a; --danger:#d95c45;
-    --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", Consolas, "SF Mono", Menlo, monospace;
-    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, sans-serif;
+    --mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+    --display: "Space Grotesk", "Inter", system-ui, sans-serif;
+    --sans: "Inter", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
   }
   *{box-sizing:border-box}
   html{scroll-behavior:smooth}
   body{
     margin:0; background:var(--bg0); color:var(--hi-dim);
-    font-family:var(--sans); font-size:16px; line-height:1.65;
+    font-family:var(--sans); font-size:16.5px; line-height:1.68;
+    font-feature-settings:"cv05","ss03"; letter-spacing:-0.006em;
     -webkit-font-smoothing:antialiased;
   }
   .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
   a{color:var(--plasma);text-decoration:none}
   a:hover{text-decoration:underline}
-  h1,h2,h3{color:var(--hi);line-height:1.25;margin:0}
+  h1,h2,h3{color:var(--hi);line-height:1.14;margin:0;font-family:var(--display);
+    font-weight:600;letter-spacing:-0.025em;font-feature-settings:"ss01","cv01"}
+  p{text-wrap:pretty}
+  h1,h2{text-wrap:balance}
   code,.mono{font-family:var(--mono)}
 
   /* ---- top bar ---- */
@@ -210,6 +224,139 @@
   table.cmp .y{color:var(--good)}
   table.cmp .n{color:var(--faint)}
   table.cmp .p{color:var(--warn)}
+
+  /* ---- atmosphere -------------------------------------------------
+     A flat #141110 reads as cheap. Two fixed layers sit behind
+     everything: a plasma bloom anchored top-left where the eye lands,
+     and a fine grain that stops large dark areas from banding. Both are
+     generated, so still zero requests. */
+  body::before{
+    content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
+    background:
+      radial-gradient(70vw 48vh at 14% -8%, rgba(237,160,63,.13), transparent 60%),
+      radial-gradient(55vw 40vh at 96% 6%, rgba(192,127,46,.06), transparent 58%),
+      radial-gradient(80vw 50vh at 50% 112%, rgba(237,160,63,.05), transparent 62%);
+  }
+  body::after{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.5;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");
+  }
+
+  /* ---- header ---- */
+  header{border-bottom:1px solid rgba(255,255,255,.055)}
+  .brand{font-family:var(--display);font-weight:700;letter-spacing:.2em}
+  .dot{box-shadow:0 0 12px var(--plasma),0 0 26px rgba(237,160,63,.45)}
+  .bar nav a{position:relative;transition:color .18s ease}
+  .bar nav a::after{
+    content:"";position:absolute;left:0;right:100%;bottom:-6px;height:1px;
+    background:var(--plasma);transition:right .28s cubic-bezier(.22,1,.36,1);
+  }
+  .bar nav a:hover::after{right:0}
+
+  /* ---- hero ---- */
+  .hero{padding:96px 0 64px;border-bottom:1px solid rgba(255,255,255,.05)}
+  .hero h1{
+    font-size:clamp(44px,7.4vw,82px);letter-spacing:-.038em;font-weight:700;
+    background:linear-gradient(176deg,#fff8ec 8%,#f2ebdf 42%,#c3b39a 100%);
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .hero .lede{font-size:clamp(17.5px,2.1vw,21.5px);color:var(--mid);line-height:1.55;letter-spacing:-.011em}
+  .chip{
+    background:linear-gradient(180deg,rgba(237,160,63,.11),rgba(237,160,63,.03));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.06);
+  }
+
+  /* ---- buttons ---- */
+  .btn{
+    position:relative;transition:transform .16s cubic-bezier(.22,1,.36,1),
+      border-color .16s ease,background .16s ease,box-shadow .16s ease;
+  }
+  .btn:hover{transform:translateY(-1.5px)}
+  .btn.primary{
+    background:linear-gradient(180deg,#f6b352,var(--plasma));
+    box-shadow:0 6px 22px -6px rgba(237,160,63,.6),inset 0 1px 0 rgba(255,255,255,.32);
+  }
+  .btn.primary:hover{box-shadow:0 12px 34px -8px rgba(237,160,63,.75),inset 0 1px 0 rgba(255,255,255,.4)}
+  .btn:not(.primary){box-shadow:inset 0 1px 0 rgba(255,255,255,.045)}
+
+  /* ---- the hero screenshot, lit ---- */
+  .hero-shot{
+    position:relative;border-color:rgba(255,255,255,.09);
+    box-shadow:0 40px 100px -28px rgba(0,0,0,.9),0 0 0 1px rgba(237,160,63,.09),
+      0 0 90px -30px rgba(237,160,63,.28);
+  }
+  .hero-shot::after{
+    content:"";position:absolute;inset:0;pointer-events:none;
+    background:linear-gradient(184deg,rgba(255,255,255,.05),transparent 26%);
+  }
+
+  /* ---- numbers ---- */
+  .stats{border-color:rgba(255,255,255,.07);background:rgba(255,255,255,.06)}
+  .stats > div{
+    background:linear-gradient(180deg,rgba(34,28,24,.92),rgba(20,17,16,.92));
+    transition:background .2s ease;
+  }
+  .stats > div:hover{background:linear-gradient(180deg,rgba(42,35,29,.95),rgba(26,22,20,.95))}
+  .stats b{
+    font-family:var(--display);font-size:29px;font-weight:600;letter-spacing:-.028em;
+    background:linear-gradient(180deg,#ffd291,var(--plasma));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+
+  /* ---- sections ---- */
+  section{border-bottom:1px solid rgba(255,255,255,.05);position:relative}
+  .eyebrow{
+    display:inline-flex;align-items:center;gap:9px;font-weight:600;
+  }
+  .eyebrow::before{content:"";width:20px;height:1px;background:var(--plasma);opacity:.75}
+  section h2{font-size:clamp(27px,3.7vw,40px)}
+  section .intro{font-size:17px;color:var(--mid)}
+
+  /* ---- feature cells ---- */
+  .grid{border-color:rgba(255,255,255,.07);background:rgba(255,255,255,.06)}
+  .cell{
+    background:linear-gradient(180deg,rgba(28,23,20,.96),rgba(20,17,16,.96));
+    transition:background .22s ease;
+  }
+  .cell:hover{background:linear-gradient(180deg,rgba(36,30,25,.98),rgba(24,20,18,.98))}
+  .cell h3{font-family:var(--display);font-weight:600;letter-spacing:-.015em;font-size:17px}
+  .cell h3 .ic{filter:drop-shadow(0 0 8px rgba(237,160,63,.55))}
+
+  /* ---- install cards ---- */
+  .install-card{
+    background:linear-gradient(180deg,rgba(28,23,20,.96),rgba(20,17,16,.96));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.045);
+    transition:transform .18s cubic-bezier(.22,1,.36,1),border-color .18s ease,box-shadow .18s ease;
+  }
+  a.install-card:hover{
+    transform:translateY(-2px);
+    box-shadow:0 18px 44px -20px rgba(0,0,0,.9),0 0 0 1px rgba(237,160,63,.16);
+  }
+  .install-card .t{font-family:var(--display);font-weight:600;letter-spacing:-.015em;font-size:17px}
+  .install-card .ic{filter:drop-shadow(0 0 10px rgba(237,160,63,.5))}
+
+  /* ---- tables ---- */
+  th{font-weight:600}
+  table.cmp tr{transition:background .16s ease}
+  table.cmp tbody tr:hover,table.cmp tr:hover{background:rgba(255,255,255,.022)}
+  .shot{box-shadow:0 18px 46px -24px rgba(0,0,0,.85)}
+
+  /* ---- roadmap ---- */
+  .roadmap .st{font-weight:600;background:rgba(255,255,255,.025)}
+  .roadmap .st.now{box-shadow:0 0 16px -4px rgba(237,160,63,.45)}
+
+  /* ---- entrance motion ----
+     Sections lift in once, on first view. Anyone who asks for reduced
+     motion simply sees them already in place. */
+  .reveal{opacity:0;transform:translateY(22px);
+    transition:opacity .7s cubic-bezier(.22,1,.36,1),transform .7s cubic-bezier(.22,1,.36,1)}
+  .reveal.in{opacity:1;transform:none}
+  @media (prefers-reduced-motion:reduce){
+    .reveal{opacity:1;transform:none;transition:none}
+    .btn:hover,a.install-card:hover{transform:none}
+    html{scroll-behavior:auto}
+  }
+
   footer{padding:44px 0 60px;color:var(--faint);font-size:13.5px}
   footer .row{display:flex;gap:22px;flex-wrap:wrap;align-items:center}
   footer .sp{margin-left:auto}
@@ -513,5 +660,27 @@
   </div>
 </footer>
 
+<script>
+  // Progressive enhancement: without JS every section is simply visible.
+  (function () {
+    var els = document.querySelectorAll("section > .wrap, .hero-shot, .stats");
+    if (!("IntersectionObserver" in window) ||
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    els.forEach(function (el) { el.classList.add("reveal"); });
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { rootMargin: "0px 0px -12% 0px", threshold: 0.06 });
+    els.forEach(function (el) { io.observe(el); });
+    // Safety net: if the observer never fires for something — an odd viewport,
+    // a container that does not scroll — the content must still appear.
+    // Invisible copy is a far worse failure than a missed animation.
+    setTimeout(function () {
+      els.forEach(function (el) { el.classList.add("in"); });
+      io.disconnect();
+    }, 2500);
+  })();
+</script>
 </body>
 </html>
