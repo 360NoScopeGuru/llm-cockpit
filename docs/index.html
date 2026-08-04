@@ -4,636 +4,1179 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tokamak — a reactor room for your local LLMs</title>
-<meta name="description" content="A Windows desktop app for running local LLMs with hardware-aware auto-config, measured benchmarks, a quant advisor, and a live telemetry cockpit. Tauri 2 + React.">
+<meta name="description" content="A Windows desktop app for running local LLMs: hardware-aware auto-config, a quant advisor, measured benchmarks and a live telemetry cockpit. Includes a working VRAM solver you can drive in the browser.">
 <meta property="og:title" content="Tokamak — a reactor room for your local LLMs">
-<meta property="og:description" content="Hardware-aware auto-config, measured benchmarks, quant advisor, and live GPU telemetry for llama.cpp. No lock-in, plain GGUF.">
+<meta property="og:description" content="Hardware-aware auto-config, measured benchmarks, quant advisor and live GPU telemetry for llama.cpp. No lock-in, plain GGUF.">
 <meta property="og:type" content="website">
 <meta property="og:image" content="https://360noscopeguru.github.io/tokamak/img/cockpit.png">
-<meta name="theme-color" content="#0c0a09">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23eda03f' stroke-width='2.5'/%3E%3Ccircle cx='16' cy='16' r='3.5' fill='%23eda03f'/%3E%3C/svg%3E">
+<meta name="theme-color" content="#ece7dc">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23a33418' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23a33418'/%3E%3C/svg%3E">
 <style>
-  /* Self-hosted variable faces — the page makes zero external requests, which
-     is the point for a tool that promises no telemetry and no cloud. */
-  @font-face{font-family:"Space Grotesk";src:url("fonts/SpaceGrotesk.woff2") format("woff2");
-    font-weight:500 700;font-style:normal;font-display:swap}
-  @font-face{font-family:"Inter";src:url("fonts/Inter.woff2") format("woff2");
-    font-weight:400 600;font-style:normal;font-display:swap}
-  @font-face{font-family:"JetBrains Mono";src:url("fonts/JetBrainsMono.woff2") format("woff2");
-    font-weight:400 600;font-style:normal;font-display:swap}
+/* ============================================================================
+   Tokamak — "COLD START → IGNITION"
 
+   The page is one continuous engineering drawing that exists in two states.
+   It opens cold, on paper. Scrolling through §2 ignites it and the whole sheet
+   inverts to ink. That inversion is driven by exactly one number, --ign (0..1),
+   which every colour on the page is mixed from. Nothing else toggles.
+
+   Zero external requests: both faces are self-hosted, every asset is relative.
+   ========================================================================= */
+
+@font-face{
+  font-family:"Departure Mono";
+  src:url("fonts/DepartureMono.woff2") format("woff2");
+  font-weight:400;font-style:normal;font-display:swap;
+}
+@font-face{
+  font-family:"Archivo";
+  src:url("fonts/Archivo.woff2") format("woff2");
+  font-weight:100 900;font-stretch:62% 125%;font-style:normal;font-display:swap;
+}
+
+/* Registered so they are guaranteed to be numbers rather than tokens. Unregistered
+   they still substitute as "0" and calc() keeps working, so this degrades safely.
+
+   Four ramps, not one, all derived in JS from the same scroll position:
+     --ign   raw 0..1 progress through §2
+     --flip  the colour inversion. Deliberately compressed into the middle ~18 %
+             of the scroll: a polarity inversion has to pass through a state
+             where foreground and background share a lightness, and the only
+             honest fix is to make that passage brief and route the text through
+             amber so it never actually disappears.
+     --hot   the plasma, which starts glowing just *before* the flip so the
+             ignition is what causes the inversion rather than accompanying it
+     --scaf  the drawing's scaffolding, which fades first — annotations stop
+             being useful the moment the machine is real */
+@property --ign{syntax:"<number>";initial-value:0;inherits:true}
+@property --flip{syntax:"<number>";initial-value:0;inherits:true}
+@property --hot{syntax:"<number>";initial-value:0;inherits:true}
+@property --scaf{syntax:"<number>";initial-value:1;inherits:true}
+@property --lit{syntax:"<number>";initial-value:0;inherits:true}
+
+:root{
+  --ign:0;--flip:0;--hot:0;--scaf:1;--lit:0;
+
+  --mono:"Departure Mono",ui-monospace,Consolas,monospace;
+  --sans:"Archivo",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+  --pad:clamp(18px,4vw,44px);
+  --ease:cubic-bezier(.22,1,.36,1);
+
+  /* Static fallbacks — the cold end of every ramp. Anything without color-mix
+     gets a perfectly usable paper-only page rather than an unstyled one. */
+  --c-bg:#ece7dc;
+  --c-fg:#14120e;
+  --c-dim:#6d6456;
+  --c-faint:#a2988a;
+  --c-line:rgba(20,18,14,.20);
+  --c-rule:rgba(20,18,14,.52);
+  --c-grid:rgba(38,58,88,.075);
+  --c-acc:#a33418;
+  --c-acc-q:rgba(163,52,24,.30);
+  --c-plate:#f4f1e9;
+  --c-sunk:rgba(20,18,14,.035);
+}
+
+/* The ramp. Red-hot to amber is not decoration: cold metal glows red first and
+   only reaches amber as it heats, so the accent hue rises with the flip.
+
+   Text takes a two-stage path — ink → amber → white — rather than a straight
+   line. A straight line between those endpoints passes through exactly the same
+   mid-grey the background is passing through, and the page turns to mush at the
+   halfway point. Routing through amber keeps contrast alive the whole way and
+   makes the midpoint read as heat rather than as a crossfade. */
+@supports (color: color-mix(in oklab, red, blue)){
   :root{
-    /* Cooler and deeper than before. The old palette leaned brown, which
-       muddied everything; amber is now the only warm thing on the page. */
-    --ink:#0c0a09;
-    --ink-1:#131110;
-    --ink-2:#191614;
-    --line:rgba(255,255,255,.07);
-    --line-2:rgba(255,255,255,.045);
-    --hi:#f7f3ec;
-    --mid:#a9a099;
-    --low:#7c736c;
-    --faint:#544c47;
-    --amber:#f0a63f;
-    --amber-hi:#ffc978;
-    --amber-deep:#7a4f18;
-    --good:#8fce6f;
-    --warn:#e0b45c;
-    --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
-    --display:"Space Grotesk","Inter",system-ui,sans-serif;
-    --sans:"Inter",ui-sans-serif,system-ui,"Segoe UI",sans-serif;
-    --pad:clamp(20px,5vw,40px);
-    --r:14px;
-    --ease:cubic-bezier(.22,1,.36,1);
-    color-scheme:dark;
-  }
-  *{box-sizing:border-box}
-  html{scroll-behavior:smooth;-webkit-text-size-adjust:100%}
-  body{
-    margin:0;background:var(--ink);color:var(--mid);
-    font:400 16.5px/1.68 var(--sans);letter-spacing:-.006em;
-    -webkit-font-smoothing:antialiased;overflow-x:hidden;
-  }
-  h1,h2,h3{
-    margin:0;color:var(--hi);font-family:var(--display);font-weight:600;
-    line-height:1.1;letter-spacing:-.03em;text-wrap:balance;
-  }
-  p{margin:0;text-wrap:pretty}
-  a{color:var(--amber);text-decoration:none}
-  code{font-family:var(--mono);font-size:.88em;color:var(--amber-hi)}
-  em{color:var(--mid)}
-  .wrap{max-width:1220px;margin:0 auto;padding:0 var(--pad)}
+    --half1: calc(min(1, var(--flip)*2)*100%);        /* 0→1 over the first half */
+    --half2: calc(max(0, var(--flip)*2 - 1)*100%);    /* 0→1 over the second     */
 
-  /* ---- ambient light: one soft source, not a brown wash ---- */
-  body::before{
-    content:"";position:fixed;inset:0;z-index:-2;pointer-events:none;
-    background:
-      radial-gradient(60vw 44vh at 78% -6%, rgba(240,166,63,.10), transparent 62%),
-      radial-gradient(52vw 40vh at 8% 12%, rgba(240,166,63,.045), transparent 60%);
+    --c-bg:    color-mix(in oklab, #08080a          calc(var(--flip)*100%), #ece7dc);
+    --c-fg:    color-mix(in oklab, #f2efe7 var(--half2),
+                 color-mix(in oklab, #ffbe64 var(--half1), #14120e));
+    --c-dim:   color-mix(in oklab, #8b8377 var(--half2),
+                 color-mix(in oklab, #c98b3e var(--half1), #6d6456));
+    --c-faint: color-mix(in oklab, #55504a          calc(var(--flip)*100%), #a2988a);
+    --c-line:  color-mix(in oklab, rgba(242,239,231,.15) calc(var(--flip)*100%), rgba(20,18,14,.20));
+    --c-rule:  color-mix(in oklab, rgba(242,239,231,.38) calc(var(--flip)*100%), rgba(20,18,14,.52));
+    --c-grid:  color-mix(in oklab, rgba(242,239,231,.045) calc(var(--flip)*100%), rgba(38,58,88,.075));
+    --c-acc:   color-mix(in oklab, #ffbe64          calc(var(--flip)*100%), #a33418);
+    --c-acc-q: color-mix(in oklab, rgba(255,190,100,.34) calc(var(--flip)*100%), rgba(163,52,24,.30));
+    --c-plate: color-mix(in oklab, #0e0e12          calc(var(--flip)*100%), #f4f1e9);
+    --c-sunk:  color-mix(in oklab, rgba(255,255,255,.028) calc(var(--flip)*100%), rgba(20,18,14,.035));
   }
-  body::after{
-    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:.42;
-    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.05'/%3E%3C/svg%3E");
-  }
+}
 
-  #bar{
-    position:fixed;top:0;left:0;height:2px;width:0;z-index:60;
-    background:linear-gradient(90deg,var(--amber-deep),var(--amber),var(--amber-hi));
-  }
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
+body{
+  margin:0;background:var(--c-bg);color:var(--c-dim);
+  font:400 16px/1.62 var(--sans);font-stretch:100%;
+  overflow-x:hidden;
+}
+h1,h2,h3{margin:0;color:var(--c-fg);font-family:var(--mono);font-weight:400;line-height:1.06}
+p{margin:0;text-wrap:pretty}
+a{color:var(--c-acc);text-decoration:none}
+b,strong{font-weight:600;color:var(--c-fg)}
+em{font-style:normal;color:var(--c-fg)}
 
-  /* ---- header ---- */
-  header{
-    position:sticky;top:0;z-index:50;
-    background:rgba(12,10,9,.72);backdrop-filter:blur(14px) saturate(1.3);
-    border-bottom:1px solid transparent;transition:border-color .3s,background .3s;
-  }
-  header.stuck{border-bottom-color:var(--line);background:rgba(12,10,9,.9)}
-  .bar{display:flex;align-items:center;gap:16px;height:60px}
-  /* Brand mark: a drawn containment ring. No glowing dot. */
-  .brand{display:flex;align-items:center;gap:10px;color:var(--hi)}
-  .brand svg{width:17px;height:17px;flex:none}
-  .brand .ring{fill:none;stroke:var(--amber);stroke-width:2.2}
-  .brand .core{fill:var(--amber)}
-  .brand span{font:700 14.5px var(--display);letter-spacing:.2em}
-  nav{margin-left:auto;display:flex;gap:26px;align-items:center}
-  nav a{
-    font:500 13px var(--sans);color:var(--low);position:relative;transition:color .2s;
-  }
-  nav a:hover{color:var(--hi)}
-  nav a::after{
-    content:"";position:absolute;left:0;right:100%;bottom:-7px;height:1px;
-    background:var(--amber);transition:right .3s var(--ease);
-  }
-  nav a:hover::after{right:0}
-  nav .cta{
-    color:var(--ink);background:var(--amber);padding:7px 15px;border-radius:100px;
-    font-weight:600;transition:transform .2s var(--ease),background .2s;
-  }
-  nav .cta::after{display:none}
-  nav .cta:hover{background:var(--amber-hi);transform:translateY(-1px);color:var(--ink)}
-  @media(max-width:880px){nav a.opt{display:none}nav{gap:18px}}
-  /* On a phone only the download action survives; the wordmark tightens so
-     the bar never pushes the page wider than the screen. */
-  @media(max-width:520px){
-    nav a:not(.cta){display:none}
-    .brand span{font-size:13px;letter-spacing:.14em}
-    .bar{gap:10px}
-  }
+/* The drafting grid the whole sheet is set on. 24 px minor, 120 px major. */
+#grid{
+  position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background-image:
+    linear-gradient(var(--c-grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--c-grid) 1px,transparent 1px),
+    linear-gradient(var(--c-grid) 1px,transparent 1px),
+    linear-gradient(90deg,var(--c-grid) 1px,transparent 1px);
+  background-size:120px 120px,120px 120px,24px 24px,24px 24px;
+}
 
-  /* ---- hero ---- */
-  .hero{padding:clamp(70px,11vw,132px) 0 0}
-  .tag{
-    display:inline-flex;align-items:center;gap:9px;padding:6px 14px;border-radius:100px;
-    border:1px solid var(--line);background:rgba(255,255,255,.028);
-    font:500 11.5px var(--mono);letter-spacing:.09em;color:var(--mid);margin-bottom:26px;
-  }
-  .tag b{color:var(--amber);font-weight:600}
-  h1{
-    font-size:clamp(42px,8.2vw,92px);letter-spacing:-.045em;font-weight:700;line-height:.98;
-    background:linear-gradient(168deg,#fffaf2 0%,#f7f3ec 38%,#a99c8c 100%);
-    -webkit-background-clip:text;background-clip:text;color:transparent;
-  }
-  .lede{
-    max-width:60ch;margin-top:26px;font-size:clamp(17px,2vw,20.5px);
-    line-height:1.55;color:var(--mid);letter-spacing:-.012em;
-  }
-  .sub{max-width:56ch;margin-top:16px;font-size:15px;color:var(--low);line-height:1.65}
-  .cta-row{display:flex;gap:12px;margin-top:34px;flex-wrap:wrap;align-items:center}
-  .btn{
-    display:inline-flex;align-items:center;gap:9px;padding:13px 24px;border-radius:100px;
-    font:600 14px var(--sans);border:1px solid var(--line);
-    color:var(--hi);background:rgba(255,255,255,.03);
-    transition:transform .2s var(--ease),background .2s,border-color .2s;
-  }
-  .btn:hover{transform:translateY(-2px);background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.14)}
-  .btn.solid{
-    background:linear-gradient(180deg,var(--amber-hi),var(--amber));
-    color:#1a1105;border-color:transparent;
-  }
-  .btn.solid:hover{background:linear-gradient(180deg,#ffd894,var(--amber-hi))}
-  .btn.plain{border-color:transparent;background:transparent;color:var(--low)}
-  .btn.plain:hover{color:var(--hi);background:transparent;transform:none}
+.wrap{width:min(1240px,100% - var(--pad)*2);margin-inline:auto}
 
-  /* ---- the shot, raked back and straightening as it rises ---- */
-  .stage{margin-top:clamp(46px,7vw,78px);perspective:1800px;max-width:100%}
-  .frame{
-    position:relative;border:1px solid var(--line);border-radius:var(--r);overflow:hidden;
-    background:var(--ink-1);
-    box-shadow:0 50px 120px -40px rgba(0,0,0,.95),0 0 0 1px rgba(240,166,63,.06);
-    transform:rotateX(var(--rake,5deg)) scale(.965);transform-origin:50% 0;
-    transition:transform .9s var(--ease);
-  }
-  .frame img{display:block;width:100%;height:auto}
-  .frame::after{
-    content:"";position:absolute;inset:0;pointer-events:none;
-    background:linear-gradient(182deg,rgba(255,255,255,.05),transparent 22%);
-  }
+/* ---- header: a caption bar, not a nav ---- */
+header{
+  position:sticky;top:0;z-index:40;background:var(--c-bg);
+  border-bottom:1px solid var(--c-line);
+}
+.hbar{display:flex;align-items:center;gap:16px;height:46px;
+  font:400 11px/1 var(--mono);letter-spacing:.18em}
+.mark{display:flex;align-items:center;gap:8px;color:var(--c-fg)}
+.mark svg{width:13px;height:13px;flex:none}
+.mark .ring{fill:none;stroke:var(--c-acc);stroke-width:2.4}
+.mark .core{fill:var(--c-acc)}
+.hnav{margin-left:auto;display:flex;align-items:center;gap:20px}
+.hnav a{color:var(--c-dim);transition:color .18s}
+.hnav a:hover{color:var(--c-fg)}
+.hnav a.dl{color:var(--c-acc)}
+@media(max-width:700px){.hnav a.opt{display:none}.hbar{gap:10px;letter-spacing:.1em}}
 
-  /* ---- stats ---- */
-  .stats{
-    display:grid;grid-template-columns:repeat(4,1fr);gap:1px;
-    background:var(--line-2);border:1px solid var(--line);border-top:0;
-    border-radius:0 0 var(--r) var(--r);overflow:hidden;
-  }
-  .stats div{background:var(--ink-1);padding:22px;min-width:0}
-  .stats b{
-    display:block;font:600 clamp(22px,2.6vw,30px) var(--display);letter-spacing:-.03em;
-    color:var(--amber);font-variant-numeric:tabular-nums;
-  }
-  .stats span{display:block;margin-top:6px;font-size:12.5px;color:var(--low);line-height:1.5}
-  @media(max-width:880px){.stats{grid-template-columns:1fr 1fr}}
-  @media(max-width:460px){.stats{grid-template-columns:1fr}}
+/* ---- sheets ---- */
+.sheet{padding:clamp(54px,8vw,112px) 0;position:relative}
+.shead{display:flex;align-items:center;gap:14px;margin-bottom:clamp(28px,4vw,48px);
+  font:400 10.5px/1 var(--mono);letter-spacing:.22em;color:var(--c-faint);white-space:nowrap}
+.shead i{flex:1 1 auto;min-width:12px;height:1px;background:var(--c-rule);opacity:.55;
+  transform:scaleX(0);transform-origin:left;transition:transform .9s var(--ease)}
+.in .shead i,.shead.in i{transform:scaleX(1)}
+.shead .nm{color:var(--c-fg)}
 
-  /* ---- sections ---- */
-  section{padding:clamp(78px,11vw,138px) 0}
-  .eyebrow{
-    display:flex;align-items:center;gap:10px;
-    font:600 11px var(--mono);letter-spacing:.18em;color:var(--amber);margin-bottom:18px;
-  }
-  .eyebrow::before{content:"";width:22px;height:1px;background:currentColor;opacity:.6}
-  h2{font-size:clamp(28px,4.4vw,50px)}
-  .intro{max-width:62ch;margin-top:20px;font-size:17px;color:var(--mid)}
+h2{font-size:clamp(19px,3.1vw,31px);letter-spacing:.01em}
+.intro{max-width:66ch;margin-top:18px;font-size:16.5px;font-stretch:106%;color:var(--c-dim)}
+.note{margin-top:14px;font-size:13.5px;color:var(--c-faint);max-width:72ch}
 
-  /* ---- bento ---- */
-  .bento{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-top:44px}
-  .box{
-    grid-column:span 2;border:1px solid var(--line);border-radius:var(--r);
-    background:linear-gradient(180deg,var(--ink-2),var(--ink-1));padding:26px;
-    min-width:0;overflow:hidden;
-    transition:transform .3s var(--ease),border-color .3s;
-  }
-  .box:hover{transform:translateY(-3px);border-color:rgba(240,166,63,.22)}
-  .box.w3{grid-column:span 3}
-  .box.w4{grid-column:span 4}
-  .box.w6{grid-column:span 6}
-  .box h3{font-size:18px;margin-bottom:10px;letter-spacing:-.02em}
-  .box p{font-size:14.5px;color:var(--low);line-height:1.62;overflow-wrap:anywhere}
-  .box p+p{margin-top:10px}
-  .box .k{
-    font:600 10.5px var(--mono);letter-spacing:.14em;color:var(--amber);
-    display:block;margin-bottom:12px;
-  }
-  .box figure{margin:0 0 16px;border:1px solid var(--line);border-radius:9px;overflow:hidden}
-  .box figure img{display:block;width:100%;height:auto}
-  @media(max-width:1000px){
-    .bento{grid-template-columns:repeat(4,1fr)}
-    .box.w6,.box.w4{grid-column:span 4}.box.w3{grid-column:span 2}
-  }
-  @media(max-width:680px){
-    .bento{grid-template-columns:1fr}
-    .box,.box.w3,.box.w4,.box.w6{grid-column:span 1}
-  }
+/* ---- sheet 1 · cold start ---- */
+.meta{font:400 10.5px/1 var(--mono);letter-spacing:.2em;color:var(--c-faint);
+  padding-bottom:14px;border-bottom:1px solid var(--c-line);margin-bottom:clamp(30px,5vw,54px);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hgrid{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);
+  gap:clamp(26px,4vw,56px);align-items:start}
+@media(max-width:900px){.hgrid{grid-template-columns:minmax(0,1fr)}}
+.hcol{container-type:inline-size;min-width:0}
+h1{
+  font-size:clamp(23px,4.7vw,56px);      /* fallback if cqi is unsupported */
+  /* The longest line is 14 characters and Departure Mono advances 0.636 em, so
+     14 chars ≈ 8.9 em. 10.4 cqi puts the headline at ~93 % of its own column at
+     every width — it can never overflow, and it never grazes the edge either. */
+  font-size:clamp(23px,10.4cqi,56px);
+  letter-spacing:0;line-height:1.1;color:var(--c-fg);
+}
+.lede{margin-top:26px;font-size:clamp(16px,1.5vw,18.5px);line-height:1.6;
+  font-stretch:104%;color:var(--c-dim);max-width:52ch}
+.sub{margin-top:14px;font-size:14.5px;line-height:1.62;color:var(--c-faint);max-width:54ch}
 
-  /* ---- principles ---- */
-  .rules{display:grid;grid-template-columns:repeat(3,1fr);gap:32px;margin-top:46px}
-  .rules>div{min-width:0;padding-left:20px;border-left:1px solid var(--amber-deep)}
-  .rules h3{font-size:16.5px;margin-bottom:9px}
-  .rules p{font-size:14.5px;color:var(--low);line-height:1.62}
-  @media(max-width:820px){.rules{grid-template-columns:1fr;gap:24px}}
+/* CTA drawn as a stamped part rather than a rounded pill */
+.cta{display:flex;flex-wrap:wrap;gap:12px;margin-top:32px;align-items:stretch}
+.stamp{
+  display:inline-flex;flex-direction:column;gap:4px;padding:12px 20px;
+  border:1.5px solid var(--c-acc);color:var(--c-acc);background:transparent;
+  font:400 13px/1.2 var(--mono);letter-spacing:.1em;position:relative;
+  transition:background .2s,color .2s;
+}
+.stamp small{font-size:9.5px;letter-spacing:.16em;opacity:.75;color:inherit}
+.stamp:hover{background:var(--c-acc);color:var(--c-bg)}
+.stamp.ghost{border-color:var(--c-line);color:var(--c-dim)}
+.stamp.ghost:hover{background:transparent;border-color:var(--c-rule);color:var(--c-fg)}
 
-  /* ---- install ---- */
-  .install{display:grid;grid-template-columns:1.1fr 1fr;gap:16px;margin-top:44px}
-  .install>*{min-width:0}
-  .card{
-    border:1px solid var(--line);border-radius:var(--r);padding:30px;
-    background:linear-gradient(180deg,var(--ink-2),var(--ink-1));
-    display:flex;flex-direction:column;gap:12px;
-    transition:transform .3s var(--ease),border-color .3s;
-  }
-  a.card:hover{transform:translateY(-3px);border-color:rgba(240,166,63,.3)}
-  .card h3{font-size:19px}
-  .card p{font-size:14.5px;color:var(--low);line-height:1.62;overflow-wrap:anywhere}
-  .card .go{margin-top:auto;font:600 12.5px var(--mono);letter-spacing:.06em;color:var(--amber)}
-  @media(max-width:820px){.install{grid-template-columns:1fr}}
-  .fineprint{margin-top:20px;font-size:13.5px;color:var(--faint);max-width:70ch}
-  details{margin-top:22px;border-top:1px solid var(--line-2);padding-top:16px}
-  summary{cursor:pointer;font:500 13px var(--mono);color:var(--low)}
-  summary:hover{color:var(--amber)}
-  pre{
-    margin:16px 0 0;padding:18px 20px;border:1px solid var(--line);border-radius:10px;
-    background:var(--ink);overflow-x:auto;font:13px/1.75 var(--mono);color:var(--mid);
-  }
-  pre .c{color:var(--faint)}
+/* the hero parts list */
+.spec{margin:0;border-top:1px solid var(--c-rule);font:400 11.5px/1 var(--mono);letter-spacing:.06em}
+.spec>div{display:flex;gap:12px;padding:9px 0;border-bottom:1px solid var(--c-line)}
+.spec dt{flex:0 0 88px;color:var(--c-faint);letter-spacing:.14em}
+.spec dd{margin:0;color:var(--c-fg);min-width:0;overflow-wrap:anywhere}
+.stat{position:relative;display:inline-block}
+.stat span{display:block}
+.stat .hot{position:absolute;inset:0;color:var(--c-acc);opacity:var(--flip)}
+.stat .cold{opacity:calc(1 - var(--flip))}
 
-  /* ---- tables ---- */
-  .scroll-x{overflow-x:auto;max-width:100%;min-width:0;margin-top:40px;
-    border:1px solid var(--line);border-radius:var(--r);-webkit-overflow-scrolling:touch}
-  table{width:100%;border-collapse:collapse;font-size:14.5px}
-  th,td{text-align:left;padding:15px 18px;border-bottom:1px solid var(--line-2);white-space:nowrap}
-  tr:last-child td{border-bottom:0}
-  th{
-    font:600 10.5px var(--mono);letter-spacing:.14em;color:var(--faint);
-    text-transform:uppercase;background:rgba(255,255,255,.018);
-  }
-  td{color:var(--low)}
-  td.k{color:var(--hi);white-space:normal;min-width:180px}
-  @media(max-width:420px){td.k{min-width:130px}th,td{padding:12px 13px}}
-  .y{color:var(--good)}.n{color:var(--faint)}.p{color:var(--warn)}
-  tbody tr{transition:background .2s}
-  tbody tr:hover{background:rgba(255,255,255,.022)}
+/* ---- sheet 2 · containment / the ignition ---- */
+#s1{padding-bottom:clamp(20px,3vw,44px)}
+#s2{height:240vh;height:240svh;padding:0}
+.stage{position:sticky;top:0;height:100vh;height:100svh;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;gap:clamp(14px,2vw,26px)}
+.reactor{width:min(880px,90vw);height:auto;max-height:64vh;display:block;overflow:visible}
+.reactor .mach{fill:none;stroke:var(--c-fg);stroke-width:1.6;
+  stroke-dasharray:100;stroke-dashoffset:100;transition:stroke-dashoffset 1.5s var(--ease)}
+.drawn .reactor .mach{stroke-dashoffset:0}
+.reactor .thin{stroke-width:1}
+.reactor .hatch{fill:url(#hx);stroke:var(--c-fg);stroke-width:1;
+  opacity:calc(1 - var(--flip)*.5)}
+.reactor .cl{stroke:var(--c-acc);stroke-width:1;stroke-dasharray:14 5 3 5;opacity:calc(.5*var(--scaf))}
+/* everything that only exists because it is a drawing */
+.scaf{opacity:var(--scaf)}
+.scaf text{fill:var(--c-fg);font:400 15px var(--mono);letter-spacing:.1em}
+.scaf .dim{stroke:var(--c-acc);stroke-width:1.2;fill:none}
+.scaf .bal{fill:none;stroke:var(--c-acc);stroke-width:1.4}
+.scaf .balt{fill:var(--c-acc);font-size:15px}
+.scaf .lead{stroke:var(--c-acc);stroke-width:1;stroke-dasharray:3 3}
+/* the plasma only exists once it is lit */
+.plasma{opacity:var(--hot);filter:drop-shadow(0 0 calc(var(--hot)*18px) rgba(255,180,90,.75))}
+.plasma .base{fill:none;stroke:#ffb347;stroke-width:26;opacity:.16}
+.plasma .flow{fill:none;stroke:#ffd9a0;stroke-width:24;stroke-linecap:butt;
+  stroke-dasharray:5 13;animation:circ 2.4s linear infinite}
+@keyframes circ{to{stroke-dashoffset:-36}}
 
-  /* ---- roadmap ---- */
-  .road{list-style:none;padding:0;margin:40px 0 0}
-  .road li{
-    display:flex;gap:18px;align-items:flex-start;padding:16px 0;
-    border-bottom:1px solid var(--line-2);font-size:15.5px;color:var(--low);
-  }
-  .road li:last-child{border-bottom:0}
-  .st{
-    font:600 10px var(--mono);letter-spacing:.1em;padding:4px 10px;border-radius:100px;
-    border:1px solid var(--line);color:var(--faint);flex:none;margin-top:3px;
-    min-width:78px;text-align:center;
-  }
-  .st.done{color:var(--good);border-color:rgba(143,206,111,.28)}
-  .st.now{color:var(--amber);border-color:rgba(240,166,63,.4);background:rgba(240,166,63,.07)}
+.fig{position:relative;font:400 11.5px/1.4 var(--mono);letter-spacing:.2em;text-align:center;min-height:2.6em}
+/* Nothing is written across the inversion. The annotations are gone before it
+   starts and the ONLINE label arrives after it finishes, so the one moment where
+   ink and paper share a lightness has no text in it to be lost. */
+.fig .cold{opacity:var(--scaf);color:var(--c-faint)}
+.fig .hot{position:absolute;left:0;right:0;top:0;opacity:var(--lit);color:var(--c-acc)}
+.fig small{display:block;margin-top:8px;letter-spacing:.08em;font-size:10.5px;opacity:.8}
 
-  /* ---- footer ---- */
-  footer{border-top:1px solid var(--line);padding:44px 0 64px}
-  .foot{display:flex;gap:20px;flex-wrap:wrap;align-items:center;font-size:13.5px;color:var(--faint)}
-  .foot .sp{margin-left:auto}
-  @media(max-width:640px){.foot .sp{margin-left:0}}
+/* ---- sheet 3 · the solver ---- */
+.solver{display:grid;grid-template-columns:minmax(0,320px) minmax(0,1fr);
+  gap:clamp(20px,3vw,40px);margin-top:clamp(26px,3vw,40px);align-items:start}
+@media(max-width:940px){.solver{grid-template-columns:minmax(0,1fr)}}
+.panel{border:1px solid var(--c-line);background:var(--c-sunk);padding:clamp(16px,2vw,22px);min-width:0}
+.ctl+.ctl{margin-top:18px}
+.ctl>label{display:flex;justify-content:space-between;gap:10px;align-items:baseline;
+  font:400 10px/1 var(--mono);letter-spacing:.18em;color:var(--c-faint);margin-bottom:9px}
+.ctl>label b{color:var(--c-fg);font-weight:400;letter-spacing:.06em}
+/* Explicit columns rather than flex-wrap: with six quants, wrapping left Q2_K
+   alone on a full-width row. Each group gets the column count that divides it. */
+.seg{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:5px}
+#qSeg,#kSeg{grid-template-columns:repeat(3,minmax(0,1fr))}
+.seg button{
+  min-width:0;padding:8px 4px;cursor:pointer;
+  font:400 11px/1 var(--mono);letter-spacing:.06em;
+  border:1px solid var(--c-line);background:transparent;color:var(--c-dim);
+  transition:border-color .18s,color .18s,background .18s;
+}
+.seg button:hover{color:var(--c-fg);border-color:var(--c-rule)}
+.seg button[aria-pressed="true"]{border-color:var(--c-acc);color:var(--c-acc);background:var(--c-acc-q)}
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:22px;background:transparent;cursor:pointer;
+}
+input[type=range]::-webkit-slider-runnable-track{height:2px;background:var(--c-rule)}
+input[type=range]::-moz-range-track{height:2px;background:var(--c-rule)}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:11px;height:18px;margin-top:-8px;
+  background:var(--c-acc);border:0;border-radius:0}
+input[type=range]::-moz-range-thumb{width:11px;height:18px;background:var(--c-acc);border:0;border-radius:0}
+input[type=range]:focus-visible{outline:1px solid var(--c-acc);outline-offset:4px}
 
-  /* ---- motion ----
-     The class is applied from JS, never in the HTML, so nothing is hidden
-     without it — plus a hard fallback below. Invisible copy is a far worse
-     failure than a missed animation. */
-  .rise{opacity:0;transform:translateY(26px);
-    transition:opacity .75s var(--ease),transform .75s var(--ease)}
-  .rise.in{opacity:1;transform:none}
-  @media (prefers-reduced-motion:reduce){
-    html{scroll-behavior:auto}
-    .rise{opacity:1!important;transform:none!important;transition:none}
-    .frame{transform:none!important;transition:none}
-    .btn:hover,.box:hover,a.card:hover,nav .cta:hover{transform:none}
-  }
+/* rod bank — the app's own motif, one rod per GiB */
+.rods{display:flex;gap:3px;height:96px;margin-top:4px}
+.rod{flex:1 1 0;min-width:0;border:1px solid var(--c-line);background:var(--c-sunk)}
+.rodx{display:flex;justify-content:space-between;margin-top:7px;
+  font:400 9.5px/1 var(--mono);letter-spacing:.1em;color:var(--c-faint)}
+.verdict{margin-top:20px;font:400 clamp(14px,2.1vw,20px)/1.25 var(--mono);letter-spacing:.04em;color:var(--c-fg)}
+.verdict.warn{color:var(--c-acc)}
+.legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:12px;font:400 10px/1 var(--mono);letter-spacing:.12em;color:var(--c-faint)}
+.legend i{display:inline-block;width:9px;height:9px;margin-right:6px;vertical-align:-1px}
+.sums{margin-top:18px;border-top:1px solid var(--c-line);font:400 11.5px/1 var(--mono);letter-spacing:.04em}
+.sums div{display:flex;gap:10px;align-items:baseline;padding:8px 0;border-bottom:1px solid var(--c-line)}
+.sums dt,.sums .l{flex:0 0 92px;color:var(--c-faint);letter-spacing:.14em}
+.sums .v{color:var(--c-fg);font-variant-numeric:tabular-nums;flex:0 0 90px}
+.sums .x{color:var(--c-faint);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto}
+.sums div.tot .v{color:var(--c-acc)}
+.ladder{margin-top:22px}
+.ladder svg{width:100%;height:auto;display:block;overflow:visible}
+.ladder .bar{fill:var(--c-acc-q)}
+.ladder .bar.cur{fill:var(--c-acc)}
+.ladder .bar.over{fill:none;stroke:var(--c-acc);stroke-width:1;stroke-dasharray:2 2}
+.ladder .bud{stroke:var(--c-fg);stroke-width:1;stroke-dasharray:5 4;opacity:.65}
+.ladder text{fill:var(--c-faint);font:400 9px var(--mono);letter-spacing:.06em}
+.ladder text.on{fill:var(--c-acc)}
+
+/* ---- install ---- */
+.two{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:clamp(14px,2vw,20px);margin-top:clamp(26px,3vw,40px)}
+@media(max-width:820px){.two{grid-template-columns:minmax(0,1fr)}}
+.card{border:1px solid var(--c-line);padding:clamp(20px,2.4vw,28px);background:var(--c-sunk);
+  display:flex;flex-direction:column;gap:12px;min-width:0}
+.card h3{font-size:14px;letter-spacing:.12em}
+.card p{font-size:14.5px;color:var(--c-dim);overflow-wrap:anywhere}
+.card .go{margin-top:auto;font:400 11px var(--mono);letter-spacing:.14em;color:var(--c-acc)}
+a.card{transition:border-color .2s}
+a.card:hover{border-color:var(--c-acc)}
+details{margin-top:22px;border-top:1px solid var(--c-line);padding-top:16px}
+summary{cursor:pointer;font:400 11px var(--mono);letter-spacing:.16em;color:var(--c-faint)}
+summary:hover{color:var(--c-acc)}
+pre{margin:16px 0 0;padding:16px;border:1px solid var(--c-line);background:var(--c-sunk);
+  overflow-x:auto;font:400 12px/1.8 var(--mono);color:var(--c-dim)}
+pre .c{color:var(--c-faint)}
+code{font:400 .88em var(--mono);color:var(--c-acc)}
+
+/* ---- plates ---- */
+.plates{display:grid;grid-template-columns:minmax(0,.62fr) minmax(0,1.38fr);
+  gap:clamp(18px,2.5vw,32px);margin-top:clamp(22px,3vw,36px);align-items:start}
+@media(max-width:900px){.plates{grid-template-columns:minmax(0,1fr)}}
+.pstack{display:flex;flex-direction:column;gap:clamp(18px,2.5vw,32px);min-width:0}
+.plate{margin:0;min-width:0}
+.plate .cap{display:flex;gap:12px;align-items:baseline;margin-bottom:10px;
+  font:400 10px/1 var(--mono);letter-spacing:.2em;color:var(--c-faint)}
+.plate .cap b{color:var(--c-fg);font-weight:400;letter-spacing:.1em}
+.shot{position:relative;border:1px solid var(--c-rule);background:#0c0a09;line-height:0}
+.shot img{display:block;width:100%;height:auto}
+.shot svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.shot .bal circle{fill:var(--c-bg);stroke:var(--c-acc);stroke-width:2.5;
+  transform-box:fill-box;transform-origin:center;transform:scale(0);
+  transition:transform .5s var(--ease)}
+.in .shot .bal circle{transform:scale(1)}
+.shot .bal text{fill:var(--c-acc);font:400 20px var(--mono);text-anchor:middle;dominant-baseline:central}
+.shot .bal line{stroke:var(--c-acc);stroke-width:2;opacity:.7}
+.shot .bal{transition:opacity .2s}
+.keys{margin:12px 0 0;padding:0;list-style:none;
+  font:400 12.5px/1.5 var(--mono);letter-spacing:.02em;color:var(--c-faint)}
+.keys li{display:flex;gap:10px;padding:5px 0;cursor:default;transition:color .18s}
+.keys li b{color:var(--c-dim);font-weight:400;flex:0 0 auto}
+.keys li:hover,.keys li.on{color:var(--c-acc)}
+.keys li:hover b,.keys li.on b{color:var(--c-acc)}
+.plate.dim .bal{opacity:.22}
+.plate.dim .bal.on{opacity:1}
+
+/* ---- spec tables ---- */
+.scroll{overflow-x:auto;max-width:100%;min-width:0;margin-top:clamp(22px,3vw,36px);
+  border-top:1px solid var(--c-rule);border-bottom:1px solid var(--c-rule)}
+table{width:100%;border-collapse:collapse;font:400 12.5px/1.4 var(--mono);letter-spacing:.02em}
+th,td{text-align:left;padding:12px 16px;border-bottom:1px solid var(--c-line);white-space:nowrap;vertical-align:top}
+tr:last-child td{border-bottom:0}
+th{font-size:9.5px;letter-spacing:.2em;color:var(--c-faint);text-transform:uppercase}
+td{color:var(--c-dim)}
+td.k{color:var(--c-fg);white-space:normal;min-width:190px;padding-left:0}
+th:first-child{padding-left:0}
+td.w{white-space:normal;min-width:240px}
+.y{color:var(--c-acc)}.n{color:var(--c-faint)}
+tbody tr{transition:background .18s}
+tbody tr:hover{background:var(--c-sunk)}
+@media(max-width:460px){td.k{min-width:140px}th,td{padding:10px 11px}}
+
+/* ---- revision block ---- */
+.rev td.r{color:var(--c-acc);min-width:52px;padding-left:0}
+.rev td.s{color:var(--c-faint);min-width:76px}
+.rev tr.now td.s{color:var(--c-acc)}
+
+/* ---- title block ----
+   Runs the full width along the bottom edge, the way a drawing's title strip
+   does. It started life as a floating corner card, which looked good until it
+   sat on top of the footer link and the solver's right-hand column — a fixed
+   panel that covers content is a bug however handsome it is. */
+#block{
+  position:fixed;left:0;right:0;bottom:0;z-index:45;
+  display:flex;align-items:stretch;
+  border-top:1px solid var(--c-rule);background:var(--c-bg);
+  font:400 10px/1 var(--mono);letter-spacing:.14em;color:var(--c-faint);
+}
+#block .r{display:flex;align-items:center;gap:8px;height:31px;padding:0 14px;
+  border-right:1px solid var(--c-line);white-space:nowrap}
+#block .r.end{margin-left:auto;border-right:0;border-left:1px solid var(--c-line)}
+#block .nm{color:var(--c-fg);letter-spacing:.2em}
+#block .sec{color:var(--c-acc);letter-spacing:.16em}
+#block a{color:var(--c-acc)}
+#block .prog{position:absolute;left:0;right:0;top:-1px;height:1px;padding:0;border:0}
+#block .prog i{display:block;height:2px;width:0;background:var(--c-acc)}
+@media(max-width:760px){#block .r.opt{display:none}#block .r{padding:0 10px;font-size:9.5px}}
+body{padding-bottom:31px}
+
+/* ---- crosshair: a drafting table, not a cursor effect ---- */
+#cross{position:fixed;inset:0;z-index:35;pointer-events:none;opacity:0;transition:opacity .3s}
+#cross.on{opacity:1}
+#cross i{position:absolute;background:var(--c-acc);opacity:.16}
+#cross .vx{top:0;bottom:0;width:1px}
+#cross .hz{left:0;right:0;height:1px}
+#cross .xy{position:absolute;top:8px;right:10px;font:400 9.5px/1 var(--mono);
+  letter-spacing:.16em;color:var(--c-acc);opacity:.5}
+@media(max-width:1000px),(pointer:coarse){#cross{display:none}}
+
+/* ---- reveal: a plotter draw, not a fade-up ---- */
+[data-draw]{opacity:0;transform:translateY(14px);
+  transition:opacity .7s var(--ease),transform .7s var(--ease)}
+[data-draw].in{opacity:1;transform:none}
+
+footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
+  font:400 10.5px/1.8 var(--mono);letter-spacing:.14em;color:var(--c-faint)}
+.fgrid{display:flex;flex-wrap:wrap;gap:10px 26px;align-items:center}
+.fgrid .sp{margin-left:auto}
+@media(max-width:700px){.fgrid .sp{margin-left:0}}
+
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  [data-draw]{opacity:1!important;transform:none!important;transition:none}
+  .reactor .mach{stroke-dashoffset:0!important;transition:none}
+  .shot .bal circle{transform:scale(1)!important;transition:none}
+  .shead i{transform:scaleX(1)!important;transition:none}
+  .plasma .flow{animation:none;stroke-dasharray:none;opacity:.5}
+  #cross{display:none}
+}
 </style>
 </head>
 <body>
-<div id="bar"></div>
+<div id="grid"></div>
+<div id="cross" aria-hidden="true"><i class="vx"></i><i class="hz"></i><span class="xy">X 0000 Y 0000</span></div>
 
-<header id="hdr">
-  <div class="wrap bar">
-    <a class="brand" href="#top" aria-label="Tokamak">
+<header>
+  <div class="wrap hbar">
+    <a class="mark" href="#top" aria-label="Tokamak">
       <svg viewBox="0 0 32 32" aria-hidden="true">
-        <circle class="ring" cx="16" cy="16" r="11"/><circle class="core" cx="16" cy="16" r="3.5"/>
+        <circle class="ring" cx="16" cy="16" r="11"/><circle class="core" cx="16" cy="16" r="3"/>
       </svg>
       <span>TOKAMAK</span>
     </a>
-    <nav>
-      <a href="#why" class="opt">Why</a>
-      <a href="#what" class="opt">Features</a>
-      <a href="#compare" class="opt">Compare</a>
-      <a href="#install">Install</a>
-      <a href="https://github.com/360NoScopeGuru/tokamak">GitHub</a>
-      <a class="cta" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">Download</a>
+    <nav class="hnav">
+      <a class="opt" href="#s3">SOLVER</a>
+      <a class="opt" href="#s4">INSTALL</a>
+      <a class="opt" href="#s5">PLATES</a>
+      <a class="opt" href="https://github.com/360NoScopeGuru/tokamak">SOURCE</a>
+      <a class="dl" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">▸ DOWNLOAD</a>
     </nav>
   </div>
 </header>
 
 <main id="top">
-  <div class="wrap hero">
-    <span class="tag"><b>v0.1.2</b> · WINDOWS + NVIDIA · TAURI 2 + REACT</span>
-    <h1>A reactor room<br>for your local LLMs.</h1>
-    <p class="lede">
-      Tokamak finds the GGUF models you already have, works out the best way to
-      run each one on your GPU, launches them through llama.cpp, and turns the
-      whole thing into a live instrument panel.
-    </p>
-    <p class="sub">
-      A tokamak holds a fusion reaction inside a magnetic ring. Roughly the job
-      here: contain a model that wants all of your VRAM, keep it stable, and get
-      useful work out of it. The name also starts with &ldquo;tok&rdquo;, the only
-      unit anyone here cares about.
-    </p>
-    <div class="cta-row">
-      <a class="btn solid" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">Download for Windows</a>
-      <a class="btn" href="#install">Install guide</a>
-      <a class="btn plain" href="https://github.com/360NoScopeGuru/tokamak">Source &rarr;</a>
-    </div>
 
-    <div class="stage">
-      <div class="frame" id="shot">
-        <img src="img/cockpit.png" width="1600" height="736" loading="eager"
-             alt="Tokamak running a model: fuel library, chat transcript and live telemetry rail at 141.6 tok/s">
+<!-- ══ SHEET 1 ══════════════════════════════════════════════════════════ -->
+<section class="sheet" id="s1" data-sheet="COLD START">
+  <div class="wrap">
+    <div class="meta">DRAWING TKMK-0102 · REV C · SCALE 1:1 · SHEET 1 OF 7 · MPL-2.0</div>
+    <div class="hgrid">
+      <div class="hcol" data-draw>
+        <h1>A REACTOR ROOM<br>FOR YOUR LOCAL<br>LLMS.</h1>
+        <p class="lede">
+          Tokamak finds the GGUF models already on your disk, works out the best
+          way to run each one on your GPU, launches them through llama.cpp, and
+          turns the whole thing into a live instrument panel.
+        </p>
+        <p class="sub">
+          A tokamak holds a fusion reaction inside a magnetic ring. Roughly the
+          job here: contain a model that wants all of your VRAM, keep it stable,
+          and get useful work out of it. The name also starts with “tok”, the
+          only unit anyone here cares about.
+        </p>
+        <div class="cta">
+          <a class="stamp" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
+            ▸ DOWNLOAD .MSI<small>WINDOWS x64 · 4.2 MB · v0.1.2</small>
+          </a>
+          <a class="stamp ghost" href="#s3">
+            DRIVE THE SOLVER<small>NO INSTALL · RUNS HERE</small>
+          </a>
+        </div>
       </div>
-      <div class="stats">
-        <div><b>141.6</b><span>tok/s decode, 4B on a 5080 Laptop</span></div>
-        <div><b>2.31 GiB</b><span>saved by q8_0 KV at 32K context</span></div>
-        <div><b>16K &rarr; 64K</b><span>context a 14B reaches as KV quantizes</span></div>
-        <div><b>4 MiB</b><span>installer — no bundled browser</span></div>
-      </div>
+      <dl class="spec" data-draw>
+        <div><dt>UNIT</dt><dd>TOKAMAK</dd></div>
+        <div><dt>VERSION</dt><dd>0.1.2</dd></div>
+        <div><dt>PLATFORM</dt><dd>WINDOWS x64 · NVIDIA</dd></div>
+        <div><dt>SHELL</dt><dd>TAURI 2 · RUST + REACT</dd></div>
+        <div><dt>ENGINE</dt><dd>llama.cpp — MANAGED</dd></div>
+        <div><dt>WEIGHTS</dt><dd>PLAIN GGUF · NO STORE</dd></div>
+        <div><dt>LICENCE</dt><dd>MPL-2.0</dd></div>
+        <div><dt>TELEMETRY</dt><dd>NONE SENT. EVER.</dd></div>
+        <div><dt>STATUS</dt><dd><span class="stat">
+          <span class="cold">○ UNPOWERED</span><span class="hot">● ONLINE</span>
+        </span></dd></div>
+      </dl>
     </div>
   </div>
+</section>
 
-  <section id="why">
-    <div class="wrap">
-      <div class="eyebrow">WHY THIS EXISTS</div>
-      <h2>Most local-LLM apps treat<br>your hardware as a black box.</h2>
-      <p class="intro">
-        They will not tell you why a model runs at 4 tok/s instead of 190. They
-        guess at GPU offload settings and never show the math. They cannot tell
-        you which quantization you <em>should have downloaded</em>. Their idea of
-        telemetry is a spinner.
-      </p>
-      <div class="rules">
-        <div>
-          <h3>No lock-in</h3>
-          <p>Reads the caches you already have — Hugging Face, LM Studio, Ollama,
-             any folder you add. Plain GGUF files, no proprietary blob store, no
-             re-downloading.</p>
+<!-- ══ SHEET 2 · the ignition ═══════════════════════════════════════════ -->
+<section id="s2" data-sheet="CONTAINMENT">
+  <div class="stage">
+    <svg class="reactor" viewBox="0 0 900 560" role="img"
+         aria-label="Plan-view drawing of a tokamak: sixteen toroidal field coils around a vessel, a central solenoid, and the plasma ring that lights once the page ignites.">
+      <defs>
+        <pattern id="hx" width="7" height="7" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+          <line x1="0" y1="0" x2="0" y2="7" stroke="currentColor" stroke-width="1" opacity=".45"/>
+        </pattern>
+      </defs>
+
+      <!-- drawing scaffolding: exists only while the machine is on paper -->
+      <g class="scaf">
+        <line class="cl" x1="90"  y1="280" x2="810" y2="280"/>
+        <line class="cl" x1="450" y1="40"  x2="450" y2="520"/>
+        <!-- radius dimension -->
+        <path class="dim" d="M450 280 L640 280"/>
+        <path class="dim" d="M632 275 L640 280 L632 285"/>
+        <text x="536" y="269" text-anchor="middle">R 190</text>
+        <!-- overall dimension under the machine -->
+        <path class="dim" d="M260 500 L640 500 M260 494 L260 506 M640 494 L640 506"/>
+        <path class="dim" d="M268 495 L260 500 L268 505 M632 495 L640 500 L632 505"/>
+        <text x="566" y="492">Ø 380</text>
+        <!-- balloons. Placed clear of the machine and of each other: a leader
+             that crosses what it points at is worse than no leader. -->
+        <g><line class="lead" x1="586" y1="152" x2="678" y2="104"/>
+           <circle class="bal" cx="690" cy="98" r="13"/><text class="balt" x="690" y="103" text-anchor="middle">1</text>
+           <text x="712" y="103">TF COIL ×16</text></g>
+        <g><line class="lead" x1="316" y1="310" x2="208" y2="372"/>
+           <circle class="bal" cx="196" cy="378" r="13"/><text class="balt" x="196" y="383" text-anchor="middle">2</text>
+           <text x="18" y="412">PLASMA — the model</text></g>
+        <g><line class="lead" x1="486" y1="316" x2="700" y2="462"/>
+           <circle class="bal" cx="714" cy="472" r="13"/><text class="balt" x="714" y="477" text-anchor="middle">3</text>
+           <text x="736" y="477">SOLENOID</text></g>
+        <text x="18" y="40">SECTION A–A · PLAN</text>
+        <text x="882" y="40" text-anchor="end">TKMK-0102</text>
+      </g>
+
+      <!-- the machine -->
+      <g class="mach-g">
+        <g class="hatch">
+          <g id="coils"></g>
+          <circle cx="450" cy="280" r="52"/>
+        </g>
+        <circle class="mach" pathLength="100" cx="450" cy="280" r="190"/>
+        <circle class="mach" pathLength="100" cx="450" cy="280" r="112"/>
+        <circle class="mach thin" pathLength="100" cx="450" cy="280" r="52"/>
+      </g>
+
+      <!-- plasma: invisible until ignition -->
+      <g class="plasma">
+        <circle class="base" cx="450" cy="280" r="151"/>
+        <circle class="flow" cx="450" cy="280" r="151"/>
+      </g>
+    </svg>
+
+    <div class="fig">
+      <span class="cold">FIG. 1 — CONTAINMENT, UNPOWERED<small>SCROLL TO IGNITE</small></span>
+      <span class="hot">CONTAINMENT · ONLINE<small>EVERYTHING BELOW IS LIVE</small></span>
+    </div>
+  </div>
+</section>
+
+<!-- ══ SHEET 3 · the solver ═════════════════════════════════════════════ -->
+<section class="sheet" id="s3" data-sheet="THE SOLVER">
+  <div class="wrap" data-draw>
+    <div class="shead"><span>SHEET 03</span><i></i><span class="nm">THE SOLVER</span></div>
+    <h2>Every other site would show you a screenshot of the arithmetic.</h2>
+    <p class="intro">
+      This one runs it. Below is Tokamak's actual VRAM estimator — the same
+      constants and the same formula the app uses, ported line for line out of
+      <code>src-tauri/src/estimator.rs</code>. Drive it. It will tell you what
+      your card can hold before you download anything at all.
+    </p>
+
+    <div class="solver">
+      <div class="panel">
+        <div class="ctl">
+          <label>GPU VRAM <b><span id="vOut">16</span> GiB</b></label>
+          <div class="seg" id="vSeg"></div>
+          <input type="range" id="vRange" min="4" max="48" step="1" value="16" aria-label="GPU VRAM in GiB">
         </div>
-        <div>
-          <h3>Measure, don&rsquo;t guess</h3>
-          <p>The estimator predicts what fits; the benchmark then actually runs
-             the model and reports real numbers from your GPU. Arithmetic you can
-             inspect, verified by measurement.</p>
+        <div class="ctl">
+          <label>MODEL <b id="mOut">QWEN3 14B</b></label>
+          <div class="seg" id="mSeg"></div>
         </div>
-        <div>
-          <h3>Show everything</h3>
-          <p>If the KV cache is about to overflow, you should see it coming. If
-             half the layers spilled to CPU, the decode-rate cliff should be
-             visible, not mysterious.</p>
+        <div class="ctl">
+          <label>QUANT <b id="qOut">Q4_K_M</b></label>
+          <div class="seg" id="qSeg"></div>
+        </div>
+        <div class="ctl">
+          <label>CONTEXT <b id="cOut">32K</b></label>
+          <input type="range" id="cRange" min="0" max="7" step="1" value="4" aria-label="Context length">
+        </div>
+        <div class="ctl">
+          <label>KV CACHE <b id="kOut">f16</b></label>
+          <div class="seg" id="kSeg"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="rods" id="rods" aria-hidden="true"></div>
+        <div class="rodx"><span>1</span><span id="rodMax">16 GiB</span></div>
+        <p class="verdict" id="verdict">—</p>
+        <div class="legend">
+          <span><i style="background:var(--c-acc)"></i>WEIGHTS</span>
+          <span><i style="background:var(--c-acc-q)"></i>KV CACHE</span>
+          <span><i style="background:var(--c-faint)"></i>OVERHEAD</span>
+          <span><i style="border:1px solid var(--c-rule)"></i>HEADROOM</span>
+        </div>
+        <dl class="sums" id="sums"></dl>
+        <div class="ladder">
+          <svg id="ladder" viewBox="0 0 420 132" role="img"
+               aria-label="Total VRAM required at each candidate context length, against the budget line."></svg>
         </div>
       </div>
     </div>
-  </section>
+    <p class="note">
+      Budget is 90&nbsp;% of total VRAM, leaving the compositor and driver their
+      share. Weights are the file scaled by the offloaded layer fraction, plus
+      5&nbsp;% for embedding and output layers that the average bits-per-weight
+      does not capture. The KV term is the only one that grows with context —
+      which is the entire reason quantizing it buys you so much.
+    </p>
+  </div>
+</section>
 
-  <section id="what">
-    <div class="wrap">
-      <div class="eyebrow">WHAT IT DOES</div>
-      <h2>An instrument panel,<br>not a chat box.</h2>
-
-      <div class="bento">
-        <div class="box w4">
-          <span class="k">DOWNLOAD</span>
-          <h3>Models, with fit shown first</h3>
-          <figure><img src="img/downloads.png" width="1400" height="498" loading="lazy"
-            alt="Hugging Face search inside Tokamak, each quant marked FITS, TIGHT or TOO BIG for this GPU"></figure>
-          <p>Search the hub from inside the app. Every quant is judged against
-             <em>your</em> card before a byte moves — so a 17 GB file that will not
-             fit says so first, not after the download. Resumable, and it lands as
-             a plain <code>.gguf</code>.</p>
-        </div>
-        <div class="box">
-          <span class="k">LIBRARY</span>
-          <h3>Everything you already have</h3>
-          <p>Scans Hugging Face, LM Studio and Ollama caches plus any folder you
-             add. Parses GGUF headers directly: architecture, quant, native
-             context, attention geometry.</p>
-          <p>Split shards collapse into one entry; vision projectors attach to
-             their parent.</p>
-        </div>
-
-        <div class="box w6">
-          <span class="k">AUTO-CONFIG</span>
-          <h3>The quant advisor and context ladder</h3>
-          <figure><img src="img/advisor.png" width="1600" height="220" loading="lazy"
-            alt="VRAM budget, context ladder with layer counts, and the quant ladder with the sweet spot marked"></figure>
-          <p>The VRAM budget split into weights, KV cache, overhead and headroom.
-             A context ladder showing how many layers actually fit at each context
-             size — bigger context costs GPU layers, and the ladder makes that
-             trade explicit instead of leaving you to guess. Then the whole GGUF
-             quant ladder judged against your card, with the sweet spot marked.</p>
-        </div>
-
-        <div class="box w3">
-          <span class="k">TELEMETRY</span>
-          <h3>Live, at 1 Hz</h3>
-          <p>VRAM as fuel rods, one per GB, segmented into weights and KV. A
-             60-second flux trace of decode rate, utilization and temperature. At
-             90% cache fill the trace flips to a red KV pressure alert.</p>
-        </div>
-        <div class="box w3">
-          <span class="k">AGENT</span>
-          <h3>Chat and code, kept apart</h3>
-          <p>Separate transcripts. The agent gets workspace-sandboxed tools —
-             reads run automatically, writes and shell commands stop at an approval
-             card. If the model stops early mid-task it gets pushed to continue
-             rather than quitting silently.</p>
-        </div>
-        <div class="box w3">
-          <span class="k">SESSIONS</span>
-          <h3>Named, and kept in full</h3>
-          <p>Every turn persisted with content, reasoning, tokens, tok/s, sampler
-             settings and timestamps — named by the model itself. One plain JSON
-             file each: greppable, diffable, portable.</p>
-        </div>
-        <div class="box w3">
-          <span class="k">KV CACHE</span>
-          <h3>Quantize it, buy context</h3>
-          <p>f16, q8_0 or q4_0 from the status bar, and the estimator costs the
-             cache accordingly so the ladder never promises context the server will
-             not have. Measured: 2.31 GiB saved on a 14B at 32K.</p>
-        </div>
+<!-- ══ SHEET 4 · install ════════════════════════════════════════════════ -->
+<section class="sheet" id="s4" data-sheet="INSTALL">
+  <div class="wrap" data-draw>
+    <div class="shead"><span>SHEET 04</span><i></i><span class="nm">INSTALL</span></div>
+    <h2>Download it and run it.</h2>
+    <p class="intro">No Rust, no Node, no toolchain. Installers are built by CI on every tagged version.</p>
+    <div class="two">
+      <a class="card" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
+        <h3>01 · WINDOWS INSTALLER</h3>
+        <p>Take the <code>.msi</code> from the latest release and run it. That is the
+           whole process. An <code>.exe</code> setup is published alongside it.</p>
+        <p>Windows will warn that the publisher is unknown — the build is unsigned.
+           Choose <b>More info → Run anyway</b>.</p>
+        <span class="go">LATEST RELEASE →</span>
+      </a>
+      <div class="card">
+        <h3>02 · WHAT YOU ALSO NEED</h3>
+        <p>An <b>NVIDIA GPU</b>. Telemetry and benchmarking read NVML. That is the
+           only hard requirement.</p>
+        <p><b>No separate inference runtime to install.</b> On first run Tokamak
+           offers to fetch the right llama.cpp build for your GPU and manages it
+           itself — and picks up LM Studio's binaries automatically if you already
+           have them.</p>
+        <p>Models are optional too: it reads your existing Hugging&nbsp;Face,
+           LM&nbsp;Studio and Ollama caches, and downloads new ones itself.</p>
       </div>
     </div>
-  </section>
-
-  <section id="compare">
-    <div class="wrap">
-      <div class="eyebrow">HOW IT COMPARES</div>
-      <h2>Where Tokamak wins,<br>and where it doesn&rsquo;t.</h2>
-      <div class="scroll-x">
-        <table>
-          <thead><tr><th></th><th>Tokamak</th><th>LM Studio</th><th>Ollama</th></tr></thead>
-          <tbody>
-            <tr><td class="k">Fit verdict before download</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
-            <tr><td class="k">Shows the VRAM arithmetic</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
-            <tr><td class="k">KV cache quantization in the UI</td><td class="y">yes</td><td class="p">flags</td><td class="n">no</td></tr>
-            <tr><td class="k">Live GPU + inference telemetry</td><td class="y">yes</td><td class="p">partial</td><td class="n">no</td></tr>
-            <tr><td class="k">Measured benchmarks in-app</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
-            <tr><td class="k">Reads other tools&rsquo; caches</td><td class="y">HF, LM Studio, Ollama</td><td class="p">own + HF</td><td class="n">own store</td></tr>
-            <tr><td class="k">Open source</td><td class="y">MPL-2.0</td><td class="n">proprietary</td><td class="y">MIT</td></tr>
-            <tr><td class="k">macOS / Linux</td><td class="n">not yet</td><td class="y">yes</td><td class="y">yes</td></tr>
-            <tr><td class="k">Signed installer</td><td class="n">unsigned</td><td class="y">yes</td><td class="y">yes</td></tr>
-            <tr><td class="k">Maturity</td><td class="n">v0.1</td><td class="y">mature</td><td class="y">mature</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="fineprint">
-        Tokamak is v0.1 by one person. It is better than both at explaining your
-        hardware, and worse than both at everything that comes from years of polish
-        and a signing certificate.
-      </p>
-    </div>
-  </section>
-
-  <section id="install">
-    <div class="wrap">
-      <div class="eyebrow">INSTALL</div>
-      <h2>Download it and run it.</h2>
-      <p class="intro">No Rust, no Node, no toolchain. Installers are built by CI
-        on every tagged version.</p>
-      <div class="install">
-        <a class="card" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
-          <h3>Windows installer</h3>
-          <p>Grab the <code>.msi</code> from the latest release and run it. That is
-             the whole process.</p>
-          <span class="go">Latest release &rarr;</span>
-        </a>
-        <div class="card">
-          <h3>What you also need</h3>
-          <p>An <b>NVIDIA GPU</b> — telemetry and benchmarking use NVML. That is the
-             only hard requirement.</p>
-          <p><b>No separate inference runtime to install.</b> On first run Tokamak
-             offers to fetch the right llama.cpp build for your GPU and manages it
-             itself — and uses LM Studio&rsquo;s binaries automatically if you
-             already have them.</p>
-          <p>Models are optional too: it reads your existing Hugging Face, LM Studio
-             and Ollama caches, and can download new ones itself.</p>
-        </div>
-      </div>
-      <p class="fineprint">
-        Windows will warn that the publisher is unknown — the build is unsigned.
-        Choose <b>More info &rarr; Run anyway</b>.
-      </p>
-      <details>
-        <summary>Building from source instead</summary>
-        <pre><span class="c">git</span> clone https://github.com/360NoScopeGuru/tokamak
+    <details>
+      <summary>▸ BUILDING FROM SOURCE INSTEAD</summary>
+<pre><span class="c">git</span> clone https://github.com/360NoScopeGuru/tokamak
 <span class="c">cd</span> tokamak
 <span class="c">npm</span> install
 <span class="c">npm</span> run tauri dev      <span class="c"># development</span>
 <span class="c">npm</span> run tauri build    <span class="c"># release build</span></pre>
-      </details>
-    </div>
-  </section>
+    </details>
+  </div>
+</section>
 
-  <section id="roadmap">
-    <div class="wrap">
-      <div class="eyebrow">ROADMAP</div>
-      <h2>Where it&rsquo;s going.</h2>
-      <ul class="road">
-        <li><span class="st done">SHIPPED</span><span>Model library across Hugging Face, LM Studio and Ollama caches, with GGUF parsing and fit verdicts</span></li>
-        <li><span class="st done">SHIPPED</span><span>Hardware-aware auto-config, context ladder, quant advisor and measured benchmarks</span></li>
-        <li><span class="st done">SHIPPED</span><span>Live telemetry cockpit: rod bank, flux trace, KV containment alert</span></li>
-        <li><span class="st done">SHIPPED</span><span>Chat and agent tabs, sandboxed workspace tools, fully detailed session history</span></li>
-        <li><span class="st done">SHIPPED</span><span>In-app model downloads and a managed llama.cpp runtime</span></li>
-        <li><span class="st now">NOW</span><span>Speculative decoding with draft-model suggestions and a live accept-rate graph</span></li>
-        <li><span class="st">NEXT</span><span>Conversation branching — fork at any message, compare branches side by side</span></li>
-        <li><span class="st">LATER</span><span>LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion</span></li>
+<!-- ══ SHEET 5 · plates ═════════════════════════════════════════════════ -->
+<section class="sheet" id="s5" data-sheet="INSTRUMENTS">
+  <div class="wrap">
+    <div class="shead" data-draw><span>SHEET 05</span><i></i><span class="nm">INSTRUMENTS</span></div>
+    <h2 data-draw>An instrument panel, not a chat box.</h2>
+    <p class="intro" data-draw>
+      Four plates, all real captures of the running application. Hover any key
+      to find it on the plate.
+    </p>
+
+    <figure class="plate" data-plate data-draw style="margin-top:clamp(22px,3vw,36px)">
+      <figcaption class="cap"><span>PLATE 1</span><b>THE COCKPIT</b></figcaption>
+      <div class="shot">
+        <img src="img/cockpit.png" width="1600" height="736" loading="eager"
+             alt="Tokamak running a model: fuel library on the left, chat transcript in the middle, live telemetry rail on the right at 141.6 tok/s.">
+        <svg viewBox="0 0 1600 736" aria-hidden="true">
+          <g class="bal" data-b="1"><line x1="1478" y1="228" x2="1478" y2="286"/><circle cx="1478" cy="300" r="17"/><text x="1478" y="301">1</text></g>
+          <g class="bal" data-b="2"><line x1="115" y1="300" x2="115" y2="356"/><circle cx="115" cy="370" r="17"/><text x="115" y="371">2</text></g>
+          <g class="bal" data-b="3"><line x1="1420" y1="152" x2="1300" y2="152"/><circle cx="1283" cy="152" r="17"/><text x="1283" y="153">3</text></g>
+          <g class="bal" data-b="4"><line x1="115" y1="640" x2="190" y2="640"/><circle cx="207" cy="640" r="17"/><text x="207" y="641">4</text></g>
+        </svg>
+      </div>
+      <ul class="keys">
+        <li data-i="1"><b>1</b><span>Rod bank — VRAM as fuel rods, one per GiB, split into weights and KV.</span></li>
+        <li data-i="2"><b>2</b><span>Fuel library — every GGUF found across Hugging Face, LM Studio, Ollama and your own folders, with its fit verdict.</span></li>
+        <li data-i="3"><b>3</b><span>Decode rate, read from llama-server's own metrics rather than guessed.</span></li>
+        <li data-i="4"><b>4</b><span>Sessions — chat and code kept apart, each named by the model itself.</span></li>
       </ul>
-    </div>
-  </section>
+    </figure>
 
-  <section id="stack">
-    <div class="wrap">
-      <div class="eyebrow">UNDER THE HOOD</div>
-      <h2>Built to be inspected.</h2>
-      <div class="scroll-x">
-        <table>
-          <tbody>
-            <tr><td class="k">Shell</td><td>Tauri 2 — Rust backend, React + TypeScript frontend, no Electron</td></tr>
-            <tr><td class="k">Inference</td><td>llama.cpp <code>llama-server</code>, managed as a child process with health probing</td></tr>
-            <tr><td class="k">Model metadata</td><td>GGUF v2/v3 header parser written from scratch in Rust</td></tr>
-            <tr><td class="k">Telemetry</td><td>NVML for GPU, llama-server&rsquo;s Prometheus <code>/metrics</code> for inference</td></tr>
-            <tr><td class="k">Storage</td><td>Plain JSON — settings and one file per session. Nothing proprietary</td></tr>
-            <tr><td class="k">Agent sandbox</td><td>Lexical + canonical path checks in Rust, unit tested against traversal</td></tr>
-          </tbody>
-        </table>
+    <div class="plates">
+      <figure class="plate" data-plate data-draw>
+        <figcaption class="cap"><span>PLATE 2</span><b>TELEMETRY</b></figcaption>
+        <div class="shot">
+          <img src="img/telemetry.png" width="620" height="930" loading="lazy"
+               alt="The telemetry rail: a 60-second flux trace of decode, utilization and temperature; the decode readout; the rod bank; and the sensor grid.">
+          <svg viewBox="0 0 620 930" aria-hidden="true">
+            <g class="bal" data-b="1"><line x1="440" y1="148" x2="530" y2="148"/><circle cx="552" cy="148" r="21"/><text x="552" y="149" font-size="24">1</text></g>
+            <g class="bal" data-b="2"><line x1="150" y1="315" x2="150" y2="252"/><circle cx="150" cy="230" r="21"/><text x="150" y="231" font-size="24">2</text></g>
+            <g class="bal" data-b="3"><line x1="300" y1="540" x2="410" y2="540"/><circle cx="432" cy="540" r="21"/><text x="432" y="541" font-size="24">3</text></g>
+            <g class="bal" data-b="4"><line x1="170" y1="795" x2="170" y2="860"/><circle cx="170" cy="882" r="21"/><text x="170" y="883" font-size="24">4</text></g>
+          </svg>
+        </div>
+        <ul class="keys">
+          <li data-i="1"><b>1</b><span>Flux trace — 60 s at 1 Hz. Flips to a red KV-pressure alert at 90 % cache fill.</span></li>
+          <li data-i="2"><b>2</b><span>Decode and prefill, separated.</span></li>
+          <li data-i="3"><b>3</b><span>The rod bank again, live.</span></li>
+          <li data-i="4"><b>4</b><span>Utilization, temperature, power, clocks, system RAM.</span></li>
+        </ul>
+      </figure>
+
+      <div class="pstack">
+        <figure class="plate" data-plate data-draw>
+          <figcaption class="cap"><span>PLATE 3</span><b>DOWNLOADS</b></figcaption>
+          <div class="shot">
+            <img src="img/downloads.png" width="1400" height="498" loading="lazy"
+                 alt="Hugging Face search inside Tokamak. Each quant is marked FITS, TIGHT or TOO BIG for this GPU before downloading.">
+            <svg viewBox="0 0 1400 498" aria-hidden="true">
+              <g class="bal" data-b="1"><line x1="1185" y1="304" x2="1185" y2="380"/><circle cx="1185" cy="400" r="19"/><text x="1185" y="401" font-size="22">1</text></g>
+              <g class="bal" data-b="2"><line x1="80" y1="320" x2="80" y2="392"/><circle cx="80" cy="412" r="19"/><text x="80" y="413" font-size="22">2</text></g>
+              <g class="bal" data-b="3"><line x1="1140" y1="30" x2="1060" y2="76"/><circle cx="1042" cy="86" r="19"/><text x="1042" y="87" font-size="22">3</text></g>
+            </svg>
+          </div>
+          <ul class="keys">
+            <li data-i="1"><b>1</b><span>Every quant judged against your card before a byte moves — a 17 GB file that will not fit says so first, not afterwards.</span></li>
+            <li data-i="2"><b>2</b><span>The whole quant ladder for a repo, expanded in place.</span></li>
+            <li data-i="3"><b>3</b><span>It lands as a plain <code>.gguf</code> in a folder you can see. Resumable.</span></li>
+          </ul>
+        </figure>
+
+        <figure class="plate" data-plate data-draw>
+          <figcaption class="cap"><span>PLATE 4</span><b>AUTO-CONFIG</b></figcaption>
+          <div class="shot">
+            <img src="img/advisor.png" width="1600" height="220" loading="lazy"
+                 alt="The containment budget split into weights, KV cache, overhead and headroom; the context ladder with layer counts; and the quant ladder with the sweet spot marked.">
+            <svg viewBox="0 0 1600 220" aria-hidden="true">
+              <g class="bal" data-b="1"><line x1="250" y1="62" x2="330" y2="24"/><circle cx="350" cy="16" r="15"/><text x="350" y="17" font-size="18">1</text></g>
+              <g class="bal" data-b="2"><line x1="556" y1="113" x2="700" y2="60"/><circle cx="720" cy="52" r="15"/><text x="720" y="53" font-size="18">2</text></g>
+              <g class="bal" data-b="3"><line x1="1240" y1="100" x2="1240" y2="44"/><circle cx="1240" cy="26" r="15"/><text x="1240" y="27" font-size="18">3</text></g>
+            </svg>
+          </div>
+          <ul class="keys">
+            <li data-i="1"><b>1</b><span>The VRAM budget, itemized. Nothing hidden behind a spinner.</span></li>
+            <li data-i="2"><b>2</b><span>The context ladder — how many layers still fit at each context size. Bigger context costs GPU layers, and the ladder makes that trade explicit.</span></li>
+            <li data-i="3"><b>3</b><span>The quant ladder judged against your card, sweet spot marked.</span></li>
+          </ul>
+        </figure>
       </div>
     </div>
-  </section>
+  </div>
+</section>
+
+<!-- ══ SHEET 6 · specification ══════════════════════════════════════════ -->
+<section class="sheet" id="s6" data-sheet="SPECIFICATION">
+  <div class="wrap" data-draw>
+    <div class="shead"><span>SHEET 06</span><i></i><span class="nm">SPECIFICATION</span></div>
+    <h2>Where it wins, and where it doesn't.</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Capability</th><th>Tokamak</th><th>LM Studio</th><th>Ollama</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Fit verdict before download</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+          <tr><td class="k">Shows the VRAM arithmetic</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+          <tr><td class="k">KV cache quantization in the UI</td><td class="y">yes</td><td class="n">flags</td><td class="n">no</td></tr>
+          <tr><td class="k">Live GPU + inference telemetry</td><td class="y">yes</td><td class="n">partial</td><td class="n">no</td></tr>
+          <tr><td class="k">Measured benchmarks in-app</td><td class="y">yes</td><td class="n">no</td><td class="n">no</td></tr>
+          <tr><td class="k">Reads other tools' caches</td><td class="y">HF, LM Studio, Ollama</td><td class="n">own + HF</td><td class="n">own store</td></tr>
+          <tr><td class="k">Open source</td><td class="y">MPL-2.0</td><td class="n">proprietary</td><td class="y">MIT</td></tr>
+          <tr><td class="k">macOS / Linux</td><td class="n">not yet</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><td class="k">Signed installer</td><td class="n">unsigned</td><td class="y">yes</td><td class="y">yes</td></tr>
+          <tr><td class="k">Maturity</td><td class="n">v0.1</td><td class="y">mature</td><td class="y">mature</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">
+      Tokamak is v0.1, written by one person. It is better than both at
+      explaining your hardware and worse than both at everything that comes
+      from years of polish and a signing certificate.
+    </p>
+
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Assembly</th><th>Detail</th></tr></thead>
+        <tbody>
+          <tr><td class="k">Shell</td><td class="w">Tauri 2 — Rust backend, React + TypeScript frontend, no Electron</td></tr>
+          <tr><td class="k">Inference</td><td class="w">llama.cpp <code>llama-server</code>, run as a child process with health probing</td></tr>
+          <tr><td class="k">Model metadata</td><td class="w">GGUF v2/v3 header parser written from scratch in Rust</td></tr>
+          <tr><td class="k">Telemetry</td><td class="w">NVML for the GPU, llama-server's Prometheus <code>/metrics</code> for inference</td></tr>
+          <tr><td class="k">Storage</td><td class="w">Plain JSON — settings, and one file per session. Nothing proprietary</td></tr>
+          <tr><td class="k">Agent sandbox</td><td class="w">Lexical + canonical path checks in Rust, unit tested against traversal</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ══ SHEET 7 · revisions ══════════════════════════════════════════════ -->
+<section class="sheet" id="s7" data-sheet="REVISIONS">
+  <div class="wrap" data-draw>
+    <div class="shead"><span>SHEET 07</span><i></i><span class="nm">REVISION HISTORY</span></div>
+    <h2>Where it's going.</h2>
+    <div class="scroll">
+      <table class="rev">
+        <thead><tr><th>Rev</th><th>Status</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td class="r">A</td><td class="s">SHIPPED</td><td class="w">Model library across Hugging Face, LM Studio and Ollama caches, GGUF parsing, fit verdicts</td></tr>
+          <tr><td class="r">B</td><td class="s">SHIPPED</td><td class="w">Hardware-aware auto-config, context ladder, quant advisor, measured benchmarks</td></tr>
+          <tr><td class="r">C</td><td class="s">SHIPPED</td><td class="w">Live telemetry cockpit — rod bank, flux trace, KV containment alert</td></tr>
+          <tr><td class="r">D</td><td class="s">SHIPPED</td><td class="w">Chat and agent tabs, sandboxed workspace tools, full session history</td></tr>
+          <tr><td class="r">E</td><td class="s">SHIPPED</td><td class="w">In-app model downloads and a managed llama.cpp runtime</td></tr>
+          <tr class="now"><td class="r">F</td><td class="s">▸ NOW</td><td class="w">Speculative decoding — draft-model suggestions and a live accept-rate graph</td></tr>
+          <tr><td class="r">G</td><td class="s">NEXT</td><td class="w">Conversation branching — fork at any message, compare branches side by side</td></tr>
+          <tr><td class="r">H</td><td class="s">LATER</td><td class="w">LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
 </main>
 
 <footer>
-  <div class="wrap foot">
-    <a class="brand" href="#top" aria-label="Tokamak">
-      <svg viewBox="0 0 32 32" aria-hidden="true">
-        <circle class="ring" cx="16" cy="16" r="11"/><circle class="core" cx="16" cy="16" r="3.5"/>
-      </svg>
-      <span style="font-size:12.5px">TOKAMAK</span>
-    </a>
-    <span>v0.1.2 · Windows + NVIDIA first · MPL-2.0</span>
-    <span class="sp"><a href="https://github.com/360NoScopeGuru/tokamak">github.com/360NoScopeGuru/tokamak</a></span>
+  <div class="wrap fgrid">
+    <span>TOKAMAK · v0.1.2 · MPL-2.0</span>
+    <span>WINDOWS + NVIDIA FIRST</span>
+    <span class="sp"><a href="https://github.com/360NoScopeGuru/tokamak">GITHUB.COM/360NOSCOPEGURU/TOKAMAK</a></span>
   </div>
 </footer>
 
+<aside id="block" aria-hidden="true">
+  <div class="prog"><i id="prog"></i></div>
+  <div class="r opt"><span class="nm">TOKAMAK</span></div>
+  <div class="r"><span>SHEET <b id="tbNo">01</b>/07</span></div>
+  <div class="r"><span class="sec" id="tbSec">COLD START</span></div>
+  <div class="r opt"><span id="tbState">○ UNPOWERED</span></div>
+  <div class="r opt"><span>v0.1.2 · MPL-2.0</span></div>
+  <div class="r end"><a href="https://github.com/360NoScopeGuru/tokamak/releases/latest">▸ DOWNLOAD .MSI</a></div>
+</aside>
+
 <script>
 (function () {
-  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-  var bar = document.getElementById("bar"),
-      hdr = document.getElementById("hdr"),
-      shot = document.getElementById("shot"),
-      ticking = false;
+"use strict";
+var root = document.documentElement;
+var reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-  // Scroll progress, header state, and the hero rake. rAF-throttled so
-  // scrolling stays cheap.
-  function onScroll() {
-    var h = document.documentElement,
-        max = h.scrollHeight - h.clientHeight,
-        y = h.scrollTop || document.body.scrollTop;
-    bar.style.width = (max > 0 ? (y / max) * 100 : 0) + "%";
-    hdr.classList.toggle("stuck", y > 12);
-    if (shot && !reduced) {
-      var t = Math.min(1, y / 520);
-      shot.style.setProperty("--rake", (5 - 5 * t).toFixed(2) + "deg");
-    }
-    ticking = false;
+/* ── coils: sixteen of them, drawn rather than typed out by hand ───────── */
+(function coils(){
+  var g = document.getElementById("coils"), s = "";
+  for (var i = 0; i < 16; i++) {
+    s += '<rect x="435" y="69" width="30" height="120" rx="2" transform="rotate('
+       + (i * 22.5) + ' 450 280)"/>';
   }
-  addEventListener("scroll", function () {
-    if (!ticking) { ticking = true; requestAnimationFrame(onScroll); }
-  }, { passive: true });
-  onScroll();
+  g.innerHTML = s;
+})();
 
-  if (reduced || !("IntersectionObserver" in window)) return;
+/* ══ THE ESTIMATOR ══════════════════════════════════════════════════════
+   Ported line for line from src-tauri/src/estimator.rs. If that file changes,
+   this must change with it — the constants below are the same ones the app
+   compiles in:
+     VRAM_HEADROOM 0.90 · OVERHEAD_BYTES 400 MiB · KvType::bits_x2 · QUANT_LADDER
+   ===================================================================== */
+var GiB = 1024 * 1024 * 1024;
+var VRAM_HEADROOM = 0.90;
+var OVERHEAD_BYTES = 400 * 1024 * 1024;
+var KV_BITS_X2 = { f16: 32, q8_0: 17, q4_0: 9 };   /* 16.0, 8.5, 4.5 bpw */
+var QUANT_LADDER = [
+  ["Q8_0", 8.5], ["Q6_K", 6.59], ["Q5_K_M", 5.69],
+  ["Q4_K_M", 4.85], ["Q3_K_M", 3.91], ["Q2_K", 2.63]
+];
+var CANDIDATE_CTX = [2048, 4096, 8192, 16384, 32768, 65536, 131072, 262144];
 
-  var els = document.querySelectorAll("section > .wrap, .stage, .cta-row");
-  els.forEach(function (el) { el.classList.add("rise"); });
+/* Real GGUF shapes, read off the models these are named for. */
+var MODELS = [
+  { id:"4b",  name:"QWEN3 4B",    params:4.02e9,  layers:36, kv:8,  hd:128, ctx:32768 },
+  { id:"8b",  name:"QWEN3 8B",    params:8.19e9,  layers:36, kv:8,  hd:128, ctx:32768 },
+  { id:"14b", name:"QWEN3 14B",   params:14.8e9,  layers:40, kv:8,  hd:128, ctx:32768 },
+  { id:"27b", name:"GEMMA 3 27B", params:27.4e9,  layers:62, kv:16, hd:128, ctx:131072 }
+];
+
+function weightsFull(m, bpw){ return m.params * bpw / 8 * 1.05; }
+function weightsBytes(m, bpw, layersOnGpu){ return weightsFull(m, bpw) * layersOnGpu / m.layers; }
+function kvBytes(m, ctx, layersOnGpu, kvType){
+  return layersOnGpu * ctx * m.kv * (m.hd * 2) * KV_BITS_X2[kvType] / 16;
+}
+function maxLayersAt(m, bpw, ctx, budget, kvType){
+  for (var n = m.layers; n >= 0; n--) {
+    if (weightsBytes(m, bpw, n) + OVERHEAD_BYTES + kvBytes(m, ctx, n, kvType) <= budget) return n;
+  }
+  return 0;
+}
+
+/* ── state ─────────────────────────────────────────────────────────────── */
+var S = { vram: 16, model: "14b", quant: "Q4_K_M", ctxIdx: 4, kv: "f16" };
+var $ = function (id) { return document.getElementById(id); };
+var gib = function (b) { return (b / GiB).toFixed(2); };
+
+function ctxRungs(m){
+  return CANDIDATE_CTX.filter(function (c) { return c <= m.ctx; });
+}
+function ctxLabel(c){ return c >= 1024 ? (c / 1024) + "K" : String(c); }
+
+function seg(host, items, get, set){
+  host.innerHTML = "";
+  items.forEach(function (it) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.textContent = it.label;
+    b.setAttribute("aria-pressed", String(get() === it.value));
+    b.addEventListener("click", function () { set(it.value); render(); });
+    host.appendChild(b);
+  });
+}
+
+function buildControls(){
+  seg($("vSeg"), [8, 12, 16, 24].map(function (v) { return { label: v + " GB", value: v }; }),
+      function () { return S.vram; },
+      function (v) { S.vram = v; $("vRange").value = v; });
+  seg($("mSeg"), MODELS.map(function (m) { return { label: m.name.split(" ").pop(), value: m.id }; }),
+      function () { return S.model; },
+      function (v) {
+        S.model = v;
+        var rungs = ctxRungs(model());
+        S.ctxIdx = Math.min(S.ctxIdx, rungs.length - 1);
+      });
+  seg($("qSeg"), QUANT_LADDER.map(function (q) { return { label: q[0], value: q[0] }; }),
+      function () { return S.quant; },
+      function (v) { S.quant = v; });
+  seg($("kSeg"), ["f16", "q8_0", "q4_0"].map(function (k) { return { label: k, value: k }; }),
+      function () { return S.kv; },
+      function (v) { S.kv = v; });
+
+  $("vRange").addEventListener("input", function (e) { S.vram = +e.target.value; render(); });
+  $("cRange").addEventListener("input", function (e) { S.ctxIdx = +e.target.value; render(); });
+}
+
+function model(){
+  for (var i = 0; i < MODELS.length; i++) if (MODELS[i].id === S.model) return MODELS[i];
+  return MODELS[2];
+}
+function bpw(){
+  for (var i = 0; i < QUANT_LADDER.length; i++) if (QUANT_LADDER[i][0] === S.quant) return QUANT_LADDER[i][1];
+  return 4.85;
+}
+
+/* ── the rod bank: one rod per GiB, filled in the app's own order ──────── */
+function drawRods(vramGiB, w, k, o){
+  var host = $("rods");
+  var n = Math.round(vramGiB);
+  if (host.childElementCount !== n) {
+    host.innerHTML = "";
+    for (var i = 0; i < n; i++) {
+      var d = document.createElement("div");
+      d.className = "rod";
+      host.appendChild(d);
+    }
+  }
+  var bounds = [w / GiB, (w + k) / GiB, (w + k + o) / GiB];
+  var cols = ["var(--c-acc)", "var(--c-acc-q)", "var(--c-faint)"];
+  for (var j = 0; j < n; j++) {
+    var lo = j, stops = [], prev = 0;
+    for (var s = 0; s < 3; s++) {
+      var end = Math.max(0, Math.min(1, bounds[s] - lo)) * 100;
+      if (end > prev) { stops.push(cols[s] + " " + prev + "% " + end + "%"); prev = end; }
+    }
+    stops.push("transparent " + prev + "% 100%");
+    host.children[j].style.background = "linear-gradient(to top," + stops.join(",") + ")";
+  }
+}
+
+/* ── the ladder chart: total VRAM at every candidate context ───────────── */
+function drawLadder(m, b, budget, rungs, curCtx){
+  var svg = $("ladder"), W = 420, H = 132, padB = 20, padT = 8;
+  var totals = rungs.map(function (c) {
+    return weightsFull(m, b) + OVERHEAD_BYTES + kvBytes(m, c, m.layers, S.kv);
+  });
+  var peak = Math.max.apply(null, totals.concat([budget])) * 1.1;
+  var y = function (v) { return padT + (H - padB - padT) * (1 - v / peak); };
+  var bw = (W / rungs.length), gap = Math.min(9, bw * 0.28);
+  var s = "";
+  rungs.forEach(function (c, i) {
+    var x = i * bw + gap / 2, w = bw - gap;
+    var fits = totals[i] <= budget;
+    var cls = c === curCtx ? "bar cur" : (fits ? "bar" : "bar over");
+    var top = y(totals[i]);
+    s += '<rect class="' + cls + '" x="' + x.toFixed(1) + '" y="' + top.toFixed(1) +
+         '" width="' + w.toFixed(1) + '" height="' + (H - padB - top).toFixed(1) + '"/>';
+    s += '<text class="' + (c === curCtx ? "on" : "") + '" x="' + (x + w / 2).toFixed(1) +
+         '" y="' + (H - 7) + '" text-anchor="middle">' + ctxLabel(c) + "</text>";
+  });
+  s += '<line class="bud" x1="0" y1="' + y(budget).toFixed(1) + '" x2="' + W +
+       '" y2="' + y(budget).toFixed(1) + '"/>';
+  s += '<text x="2" y="' + (y(budget) - 5).toFixed(1) + '">BUDGET ' + gib(budget) + " GiB</text>";
+  svg.innerHTML = s;
+}
+
+/* ── render ────────────────────────────────────────────────────────────── */
+function render(){
+  var m = model(), b = bpw();
+  var rungs = ctxRungs(m);
+  var cr = $("cRange");
+  cr.max = String(rungs.length - 1);
+  if (S.ctxIdx > rungs.length - 1) S.ctxIdx = rungs.length - 1;
+  cr.value = String(S.ctxIdx);
+  var ctx = rungs[S.ctxIdx];
+
+  var budget = S.vram * GiB * VRAM_HEADROOM;
+  var layers = maxLayersAt(m, b, ctx, budget, S.kv);
+  var w = weightsBytes(m, b, layers);
+  var k = kvBytes(m, ctx, layers, S.kv);
+  var o = layers > 0 ? OVERHEAD_BYTES : 0;
+  var total = w + k + o;
+
+  $("vOut").textContent = S.vram;
+  $("mOut").textContent = m.name;
+  $("qOut").textContent = S.quant;
+  $("cOut").textContent = ctxLabel(ctx);
+  $("kOut").textContent = S.kv;
+  $("rodMax").textContent = Math.round(S.vram) + " GiB";
+
+  var v = $("verdict");
+  if (layers === m.layers)      { v.textContent = layers + " / " + m.layers + " LAYERS ON GPU · FITS"; v.className = "verdict"; }
+  else if (layers > 0)          { v.textContent = layers + " / " + m.layers + " LAYERS ON GPU · PARTIAL OFFLOAD"; v.className = "verdict warn"; }
+  else                          { v.textContent = "0 / " + m.layers + " LAYERS · WON'T FIT, CPU FALLBACK"; v.className = "verdict warn"; }
+
+  drawRods(S.vram, w, k, o);
+
+  /* what f16 would have cost at this same offload — the case for quantizing */
+  var kF16 = kvBytes(m, ctx, layers, "f16");
+  var saved = kF16 - k;
+  var rows = [
+    ["BUDGET",  gib(budget) + " GiB", S.vram + " × 0.90"],
+    ["WEIGHTS", gib(w) + " GiB",      layers + "/" + m.layers + " layers × " + b + " bpw"],
+    ["KV CACHE", gib(k) + " GiB",     layers + " × " + ctx + " × " + m.kv + " × " + (m.hd * 2) + " × " + (KV_BITS_X2[S.kv] / 2) + " bit"],
+    ["OVERHEAD", gib(o) + " GiB",     "compute buffers"]
+  ];
+  var html = "";
+  rows.forEach(function (r) {
+    html += '<div><span class="l">' + r[0] + '</span><span class="v">' + r[1] +
+            '</span><span class="x">' + r[2] + "</span></div>";
+  });
+  html += '<div class="tot"><span class="l">TOTAL</span><span class="v">' + gib(total) +
+          ' GiB</span><span class="x">' + gib(Math.max(0, budget - total)) + " GiB headroom</span></div>";
+  if (saved > 0) {
+    html += '<div><span class="l">SAVED</span><span class="v">' + gib(saved) +
+            ' GiB</span><span class="x">by ' + S.kv + " instead of f16</span></div>";
+  }
+  $("sums").innerHTML = html;
+
+  drawLadder(m, b, budget, rungs, ctx);
+
+  /* the VRAM slider and its presets set the same value, so the pressed states
+     have to be re-derived from state rather than from whichever was clicked */
+  syncPressed();
+}
+
+function syncPressed(){
+  var map = [["vSeg", [8, 12, 16, 24], S.vram],
+             ["mSeg", MODELS.map(function (m) { return m.id; }), S.model],
+             ["qSeg", QUANT_LADDER.map(function (q) { return q[0]; }), S.quant],
+             ["kSeg", ["f16", "q8_0", "q4_0"], S.kv]];
+  map.forEach(function (e) {
+    var host = $(e[0]);
+    for (var i = 0; i < host.children.length; i++) {
+      host.children[i].setAttribute("aria-pressed", String(e[1][i] === e[2]));
+    }
+  });
+}
+
+buildControls();
+render();
+
+/* ══ SCROLL: one handler drives ignition, the title block, everything ═══ */
+var s2 = document.getElementById("s2");
+var sheets = [].slice.call(document.querySelectorAll("[data-sheet]"));
+var tbNo = $("tbNo"), tbSec = $("tbSec"), tbState = $("tbState"), prog = $("prog");
+var ticking = false, lastSheet = -1;
+
+function clamp01(v){ return v < 0 ? 0 : v > 1 ? 1 : v; }
+function smooth(t){ return t * t * (3 - 2 * t); }
+function set(name, v){ root.style.setProperty(name, v.toFixed(4)); }
+
+function onScroll(){
+  ticking = false;
+
+  /* ignition: scrub 0→1 across the first 78 % of §2's scroll range, so the
+     reactor is fully lit while still pinned rather than half-lit on the way out */
+  var r = s2.getBoundingClientRect();
+  var span = (s2.offsetHeight - innerHeight) * 0.78;
+  var p = span > 0 ? (-r.top) / span : (r.top < 0 ? 1 : 0);
+  p = clamp01(p);
+
+  if (reduced) {
+    /* no scrubbed inversion for anyone who asked not to have one: it lands on
+       one side or the other and stays there */
+    var on = p > 0.5 ? 1 : 0;
+    set("--ign", on); set("--flip", on); set("--hot", on);
+    set("--scaf", 1 - on); set("--lit", on);
+  } else {
+    set("--ign", p);
+    set("--flip", smooth(clamp01((p - 0.46) / 0.12)));  /* the brief passage */
+    set("--hot",  smooth(clamp01((p - 0.30) / 0.34)));  /* leads the flip */
+    set("--scaf", 1 - clamp01((p - 0.22) / 0.22));      /* leads everything */
+    set("--lit",  smooth(clamp01((p - 0.60) / 0.12)));  /* lands after it */
+  }
+  tbState.textContent = p > 0.53 ? "● ONLINE" : "○ UNPOWERED";
+
+  /* which sheet is in front of the reader */
+  var i = 0;
+  for (var j = 0; j < sheets.length; j++) {
+    if (sheets[j].getBoundingClientRect().top <= innerHeight * 0.4) i = j;
+  }
+  if (i !== lastSheet) {
+    lastSheet = i;
+    tbNo.textContent = ("0" + (i + 1)).slice(-2);
+    tbSec.textContent = sheets[i].getAttribute("data-sheet");
+  }
+
+  var max = root.scrollHeight - root.clientHeight;
+  prog.style.width = (max > 0 ? (root.scrollTop / max) * 100 : 0) + "%";
+}
+addEventListener("scroll", function () {
+  if (!ticking) { ticking = true; requestAnimationFrame(onScroll); }
+}, { passive: true });
+addEventListener("resize", onScroll, { passive: true });
+onScroll();
+
+/* ══ REVEAL: plotter draw-in ═══════════════════════════════════════════ */
+if ("IntersectionObserver" in window) {
   var io = new IntersectionObserver(function (es) {
     es.forEach(function (e) {
       if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
     });
-  }, { rootMargin: "0px 0px -10% 0px", threshold: 0.05 });
-  els.forEach(function (el) { io.observe(el); });
-  // Hard fallback: if the observer never fires, show everything anyway.
-  setTimeout(function () {
-    els.forEach(function (el) { el.classList.add("in"); });
-    io.disconnect();
-  }, 2200);
+  }, { rootMargin: "0px 0px -8% 0px", threshold: 0.04 });
+  [].forEach.call(document.querySelectorAll("[data-draw],[data-plate]"), function (el) { io.observe(el); });
 
-  // No count-up on the stat numerals. They are measured facts, not decoration:
-  // animating them means the page displays wrong figures for a second, and any
-  // screenshot or social preview catches one mid-flight. They fade in with
-  // their section instead.
+  /* the reactor draws itself once, when it first comes into view */
+  var io2 = new IntersectionObserver(function (es) {
+    es.forEach(function (e) {
+      if (e.isIntersecting) { e.target.classList.add("drawn"); io2.unobserve(e.target); }
+    });
+  }, { threshold: 0.15 });
+  io2.observe(document.querySelector(".stage"));
+
+  /* Hard fallback: if the observer never fires, show everything anyway.
+     Invisible copy is a far worse failure than a missed animation. */
+  setTimeout(function () {
+    [].forEach.call(document.querySelectorAll("[data-draw],[data-plate]"), function (el) { el.classList.add("in"); });
+    document.querySelector(".stage").classList.add("drawn");
+  }, 2600);
+} else {
+  [].forEach.call(document.querySelectorAll("[data-draw],[data-plate]"), function (el) { el.classList.add("in"); });
+  document.querySelector(".stage").classList.add("drawn");
+}
+
+/* ══ PLATES: hover a key, find it on the plate (and back) ══════════════ */
+[].forEach.call(document.querySelectorAll("[data-plate]"), function (plate) {
+  var keys = [].slice.call(plate.querySelectorAll(".keys li"));
+  var bals = [].slice.call(plate.querySelectorAll(".bal"));
+  function hi(n){
+    plate.classList.toggle("dim", n !== null);
+    keys.forEach(function (k) { k.classList.toggle("on", k.getAttribute("data-i") === n); });
+    bals.forEach(function (b) { b.classList.toggle("on", b.getAttribute("data-b") === n); });
+  }
+  keys.forEach(function (k) {
+    k.addEventListener("mouseenter", function () { hi(k.getAttribute("data-i")); });
+    k.addEventListener("mouseleave", function () { hi(null); });
+  });
+});
+
+/* ══ CROSSHAIR: a drafting table ═══════════════════════════════════════ */
+(function crosshair(){
+  if (reduced || !matchMedia("(pointer:fine)").matches) return;
+  var el = document.getElementById("cross");
+  var vx = el.querySelector(".vx"), hz = el.querySelector(".hz"), xy = el.querySelector(".xy");
+  var x = 0, y = 0, q = false;
+  function paint(){
+    q = false;
+    vx.style.transform = "translateX(" + x + "px)";
+    hz.style.transform = "translateY(" + y + "px)";
+    xy.textContent = "X " + ("000" + Math.round(x)).slice(-4) + "  Y " + ("000" + Math.round(y)).slice(-4);
+  }
+  addEventListener("pointermove", function (e) {
+    if (e.pointerType !== "mouse") return;
+    x = e.clientX; y = e.clientY;
+    el.classList.add("on");
+    if (!q) { q = true; requestAnimationFrame(paint); }
+  }, { passive: true });
+  addEventListener("pointerleave", function () { el.classList.remove("on"); }, { passive: true });
+})();
 })();
 </script>
 </body>
