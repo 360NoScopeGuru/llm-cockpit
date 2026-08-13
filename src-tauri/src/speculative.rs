@@ -43,8 +43,19 @@
 
 use serde::Serialize;
 
+use crate::estimator::{self, KvType, PairEstimate, PairVerdict};
 use crate::gguf::GgufMetadata;
 use crate::scanner::ModelEntry;
+
+/// The hardware and launch settings a pair would actually run under. Without
+/// this, ranking can only reason about compute cost; with it, it can say
+/// whether the two models fit on the card at once.
+#[derive(Debug, Clone, Copy)]
+pub struct PairContext {
+    pub gpu_total_bytes: u64,
+    pub ctx: u64,
+    pub kv: KvType,
+}
 
 /// Largest permitted difference in vocab size, mirroring llama.cpp's
 /// `SPEC_VOCAB_MAX_SIZE_DIFFERENCE`. Hard-coded upstream, so it can drift; if
@@ -202,6 +213,9 @@ pub struct DraftCandidate {
     /// This candidate's active parameters as a fraction of the target's.
     pub cost_ratio: Option<f64>,
     pub economics: DraftEconomics,
+    /// What running this pair actually costs in VRAM. `None` when no GPU
+    /// context was supplied or either model's shape could not be resolved.
+    pub pair: Option<PairEstimate>,
 }
 
 /// Total parameters, stated if the file says so and derived from its size if
@@ -250,17 +264,28 @@ fn active_params(meta: &GgufMetadata, size_bytes: u64) -> Option<u64> {
 
 /// Rank every scanned model as a possible draft for `target`.
 ///
-/// Ordering is compatible first, then cheapest first. This deliberately does
-/// *not* consider VRAM — whether the pair actually fits together is a separate
-/// question, and answering it here would mean guessing at context length and
-/// KV cache type.
+/// Ordering is compatible first, then cheapest first.
+///
+/// When `pair_ctx` is supplied, each candidate is also budgeted against the
+/// target on the real GPU, and one that only fits by evicting target layers is
+/// demoted to `Counterproductive` however cheap it looks per token: layers
+/// pushed to system RAM slow down every token the target produces, which no
+/// accept rate repays. Without a GPU context, the ranking falls back to
+/// comparing compute cost alone.
 pub fn rank_drafts(
     target_path: &str,
     target: &GgufMetadata,
     target_size_bytes: u64,
     models: &[ModelEntry],
+    pair_ctx: Option<PairContext>,
 ) -> Vec<DraftCandidate> {
     let target_cost = active_params(target, target_size_bytes);
+    // Resolving the target's shape can fail on sparse metadata; if it does,
+    // no pair arithmetic is possible for any candidate.
+    let target_shape = pair_ctx.and_then(|_| {
+        let mut ignored = Vec::new();
+        estimator::shape_from_metadata(target, target_size_bytes, &mut ignored)
+    });
 
     let mut out: Vec<DraftCandidate> = models
         .iter()
@@ -282,15 +307,38 @@ pub fn rank_drafts(
                 Some(_) => DraftEconomics::Counterproductive,
                 None => DraftEconomics::Unknown,
             };
-            // Compute cost is only half the story: both models are resident at
-            // once, so a draft whose weights are larger than the target's
-            // cannot be a recommendation however cheap it is per token. A
-            // sparse MoE is genuinely fast — and still has to fit. This is a
-            // floor, not a budget; the real pair arithmetic belongs with the
-            // estimator and is not attempted here.
-            if m.size_bytes >= target_size_bytes && economics == DraftEconomics::Recommended {
-                economics = DraftEconomics::Marginal;
+            // Budget the two models together when the hardware is known.
+            let pair = match (pair_ctx, target_shape.as_ref()) {
+                (Some(cx), Some(ts)) => {
+                    let mut ignored = Vec::new();
+                    estimator::shape_from_metadata(meta, m.size_bytes, &mut ignored).map(|ds| {
+                        estimator::estimate_pair(ts, &ds, cx.ctx, cx.gpu_total_bytes, cx.kv)
+                    })
+                }
+                _ => None,
+            };
+
+            match pair.as_ref().map(|p| p.verdict) {
+                // A pair that does not fit, or fits only by demoting the
+                // target to partial offload, is not a trade worth making.
+                Some(PairVerdict::TooBig) | Some(PairVerdict::CostsTargetLayers) => {
+                    economics = DraftEconomics::Counterproductive;
+                }
+                Some(PairVerdict::Fits) => {}
+                // No hardware context. Fall back to the crude guard: both
+                // models are resident at once, so a draft whose weights
+                // outweigh the target's cannot be recommended however cheap it
+                // is per token — a sparse MoE is genuinely fast and still has
+                // to fit.
+                None => {
+                    if m.size_bytes >= target_size_bytes
+                        && economics == DraftEconomics::Recommended
+                    {
+                        economics = DraftEconomics::Marginal;
+                    }
+                }
             }
+
             Some(DraftCandidate {
                 path: m.path.clone(),
                 label: m
@@ -304,6 +352,7 @@ pub fn rank_drafts(
                 active_params: cost,
                 cost_ratio: ratio,
                 economics,
+                pair,
             })
         })
         .collect();
@@ -541,7 +590,7 @@ mod tests {
             entry("mid.gguf", 9_000, Some(dense(4_000_000_000))),
             entry("tiny.gguf", 2_000, Some(dense(600_000_000))),
         ];
-        let ranked = rank_drafts("target.gguf", &target, 30_000, &models);
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         assert_eq!(ranked[0].path, "tiny.gguf");
         assert_eq!(ranked[0].economics, DraftEconomics::Recommended);
         assert_eq!(ranked[1].path, "mid.gguf");
@@ -564,7 +613,7 @@ mod tests {
     fn dense_draft_for_an_moe_target_is_counterproductive() {
         let target = moe(35_000_000_000, 8, 256); // ~1.1B active
         let models = vec![entry("dense-27b.gguf", 15_000, Some(dense(27_000_000_000)))];
-        let ranked = rank_drafts("target.gguf", &target, 30_000, &models);
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         assert_eq!(ranked[0].economics, DraftEconomics::Counterproductive);
         assert!(ranked[0].size_bytes < 30_000, "the file really is smaller");
     }
@@ -580,17 +629,75 @@ mod tests {
             40_000,
             Some(moe(35_000_000_000, 8, 256)),
         )];
-        let ranked = rank_drafts("target.gguf", &target, 30_000, &models);
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         // ~1.1B active against 27B is 4% — cheap by compute alone.
         assert!(ranked[0].cost_ratio.unwrap() < RECOMMEND_MAX_RATIO);
         assert_eq!(ranked[0].economics, DraftEconomics::Marginal);
+    }
+
+    /// A draft can be cheap per token and still be the wrong call: if loading
+    /// it pushes target layers onto the CPU, every token the target produces
+    /// gets slower. With a GPU context supplied, that outranks the compute
+    /// argument entirely.
+    #[test]
+    fn a_draft_that_evicts_target_layers_is_demoted_once_vram_is_known() {
+        let mut target = dense(14_000_000_000);
+        target.block_count = Some(40);
+        target.head_count = Some(40);
+        target.head_count_kv = Some(8);
+        target.embedding_length = Some(5120);
+        target.context_length = Some(32768);
+        let mut draft_md = dense(600_000_000);
+        draft_md.block_count = Some(28);
+        draft_md.head_count = Some(16);
+        draft_md.head_count_kv = Some(8);
+        draft_md.embedding_length = Some(2048);
+        draft_md.context_length = Some(32768);
+
+        let models = vec![entry("draft.gguf", 500_000_000, Some(draft_md))];
+
+        // On a roomy card the draft is free and stays recommended.
+        let roomy = rank_drafts(
+            "target.gguf",
+            &target,
+            9_000_000_000,
+            &models,
+            Some(PairContext {
+                gpu_total_bytes: 24 * 1024 * 1024 * 1024,
+                ctx: 8192,
+                kv: KvType::F16,
+            }),
+        );
+        assert_eq!(roomy[0].economics, DraftEconomics::Recommended);
+        assert_eq!(
+            roomy[0].pair.as_ref().unwrap().verdict,
+            PairVerdict::Fits
+        );
+
+        // On a card where the target only just fits, the same draft is a loss.
+        let tight = rank_drafts(
+            "target.gguf",
+            &target,
+            9_000_000_000,
+            &models,
+            Some(PairContext {
+                gpu_total_bytes: 10 * 1024 * 1024 * 1024,
+                ctx: 8192,
+                kv: KvType::F16,
+            }),
+        );
+        let p = tight[0].pair.as_ref().unwrap();
+        assert!(p.target_layers_evicted > 0, "expected evicted layers");
+        assert_eq!(tight[0].economics, DraftEconomics::Counterproductive);
+        // The compute argument is unchanged — only the VRAM reality differs.
+        assert!(tight[0].cost_ratio.unwrap() < RECOMMEND_MAX_RATIO);
     }
 
     #[test]
     fn missing_parameter_counts_leave_economics_unknown() {
         let target = meta("gpt2", 151936); // no parameter_count
         let models = vec![entry("x.gguf", 500, Some(dense(600_000_000)))];
-        let ranked = rank_drafts("target.gguf", &target, 30_000, &models);
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         assert_eq!(ranked[0].economics, DraftEconomics::Unknown);
         assert_eq!(ranked[0].cost_ratio, None);
     }
@@ -608,7 +715,7 @@ mod tests {
             proj,
             entry("ok.gguf", 500, Some(dense(600_000_000))),
         ];
-        let ranked = rank_drafts("target.gguf", &target, 30_000, &models);
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].path, "ok.gguf");
     }
@@ -617,7 +724,7 @@ mod tests {
     fn unparsed_models_are_skipped_entirely() {
         let target = dense(14_000_000_000);
         let models = vec![entry("broken.gguf", 500, None)];
-        assert!(rank_drafts("target.gguf", &target, 30_000, &models).is_empty());
+        assert!(rank_drafts("target.gguf", &target, 30_000, &models, None).is_empty());
     }
 
     /// Rank the real library against every real model on this machine, so the
@@ -633,17 +740,24 @@ mod tests {
             .iter()
             .filter(|m| !m.is_shard_continuation && !m.is_mmproj && m.metadata.is_some())
             .collect();
-        println!("\n--- {} candidate target(s) ---", targets.len());
+        // Budget against a plausible 16 GiB card at a working context, so the
+        // pair verdicts are exercised rather than skipped.
+        let pair_ctx = Some(PairContext {
+            gpu_total_bytes: 16 * 1024 * 1024 * 1024,
+            ctx: 8192,
+            kv: KvType::F16,
+        });
+        println!("\n--- {} candidate target(s), budgeted on 16GiB ---", targets.len());
 
         for t in &targets {
             let meta = t.metadata.as_ref().unwrap();
-            let ranked = rank_drafts(&t.path, meta, t.size_bytes, &models);
+            let ranked = rank_drafts(&t.path, meta, t.size_bytes, &models, pair_ctx);
+            // Show every tokenizer-compatible candidate with the reason it was
+            // or was not recommended. Filtering silently here would hide
+            // whether a "no usable draft" result is real arithmetic or a bug.
             let usable: Vec<_> = ranked
                 .iter()
-                .filter(|c| {
-                    matches!(c.verdict, DraftVerdict::Compatible)
-                        && c.economics != DraftEconomics::Counterproductive
-                })
+                .filter(|c| matches!(c.verdict, DraftVerdict::Compatible))
                 .collect();
             println!(
                 "\nTARGET {}  (vocab {} / {}, experts {}/{})",
@@ -658,18 +772,33 @@ mod tests {
                 meta.expert_count.map(|v| v.to_string()).unwrap_or("-".into()),
             );
             if usable.is_empty() {
-                println!("  no usable draft in the library");
+                println!("  no tokenizer-compatible model in the library");
             }
             for c in usable.iter().take(3) {
+                let gb = |b: u64| b as f64 / 1024.0 / 1024.0 / 1024.0;
                 println!(
-                    "  DRAFT {:<46} {:.2}GB  {:>6}  cost {}",
+                    "  DRAFT {:<44} {:.2}GB  cost {}  -> {:?}",
                     c.label,
-                    c.size_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
-                    c.quant_label.as_deref().unwrap_or("?"),
+                    gb(c.size_bytes),
                     c.cost_ratio
-                        .map(|r| format!("{:.1}% [{:?}]", r * 100.0, c.economics))
+                        .map(|r| format!("{:.1}%", r * 100.0))
                         .unwrap_or("?".into()),
+                    c.economics,
                 );
+                if let Some(p) = &c.pair {
+                    println!(
+                        "        pair {:?}: target {}/{} layers (-{}), draft {}/{}, {:.2}+{:.2}GB of {:.2}GB",
+                        p.verdict,
+                        p.target_layers_on_gpu,
+                        p.target_layers_total,
+                        p.target_layers_evicted,
+                        p.draft_layers_on_gpu,
+                        p.draft_layers_total,
+                        gb(p.est_target_bytes),
+                        gb(p.est_draft_bytes),
+                        gb(p.budget_bytes),
+                    );
+                }
             }
         }
     }
