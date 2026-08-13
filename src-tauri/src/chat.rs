@@ -160,15 +160,14 @@ fn clean_title(raw: &str) -> String {
     let line = without_think
         .lines()
         .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .next_back()
+        .rfind(|l| !l.is_empty())
         .unwrap_or("");
     let line = line
         .trim_start_matches("**")
         .trim_end_matches("**")
         .trim()
-        .trim_start_matches(|c: char| c == '"' || c == '\'' || c == '“')
-        .trim_end_matches(|c: char| c == '"' || c == '\'' || c == '”' || c == '.');
+        .trim_start_matches(['"', '\'', '“'])
+        .trim_end_matches(['"', '\'', '”', '.']);
     let line = line
         .strip_prefix("Title:")
         .or_else(|| line.strip_prefix("title:"))

@@ -82,7 +82,7 @@ pub fn discover() -> Vec<OllamaModel> {
         };
         out.push(model);
     }
-    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    out.sort_by_cached_key(|m| m.name.to_lowercase());
     out.dedup_by(|a, b| a.blob_path == b.blob_path);
     out
 }

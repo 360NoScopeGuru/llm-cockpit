@@ -175,12 +175,26 @@ Design notes:
 
 ## Roadmap
 
-- Sampler presets and per-message settings provenance
-- Persistent chat transcripts
-- Model downloads (grab the advisor's recommended quant straight from Hugging Face)
-- Speculative decoding setup with a live accept-rate display
-- KV cache quantization as a first-class toggle
-- Multi-GPU and tensor-parallel backends (vLLM / ExLlamaV2) behind the same cockpit
+Revision letters match the [landing page](https://360noscopeguru.github.io/tokamak/)'s
+revision block, so the two never drift apart again.
+
+Shipped:
+
+- **Rev A** — model library across Hugging Face, LM Studio and Ollama caches, GGUF parsing, fit verdicts
+- **Rev B** — hardware-aware auto-config, context ladder, quant advisor, measured benchmarks
+- **Rev C** — live telemetry cockpit: rod bank, flux trace, KV containment alert
+- **Rev D** — chat and agent tabs, sandboxed workspace tools, full session history
+- **Rev E** — in-app model downloads and a managed `llama.cpp` runtime, so LM Studio is not a prerequisite
+
+Ahead:
+
+- **Rev F** *(in progress)* — speculative decoding: draft-model suggestions, VRAM budgeting for the draft, and a live accept-rate display
+- **Rev G** — conversation branching: fork at any message, compare branches side by side
+- **Rev H** — LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion
+
+Also wanted, unscheduled: sampler presets and per-message settings provenance
+(the sampler parameters are already plumbed through, but there is nothing that
+saves a named preset or records which settings produced a given reply).
 
 ## License
 

@@ -211,6 +211,13 @@ fn downloads_dir() -> Result<String, String> {
 }
 
 /// Start a download. `source` is "huggingface" | "url" | "ollama".
+///
+/// Wide by design: Tauri commands take their payload as flat parameters, and
+/// which of `repo`/`file`/`url`/`model` are present depends on `source`. Two of
+/// the eight (`window`, `state`) are injected by Tauri, not passed by the
+/// caller — bundling the rest into a struct would only move the same fields
+/// behind an extra layer on both sides of the bridge.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn download_start(
     window: tauri::Window,

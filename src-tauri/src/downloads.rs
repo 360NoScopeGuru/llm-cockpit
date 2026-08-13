@@ -10,7 +10,7 @@
 //!   * `huggingface` — search the hub, pick a quant, stream it down.
 //!   * `url`         — paste a direct link to a .gguf.
 //!   * `ollama`      — shell out to `ollama pull` (only offered when Ollama is
-//!                     installed; the blobs it writes are already scanned).
+//!     installed; the blobs it writes are already scanned).
 //!
 //! Downloads are resumable: bytes go to `<name>.part` and a restart continues
 //! with a Range request, so a dropped connection 15 GiB in is not fatal.
@@ -25,7 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tauri::Emitter;
 
 const HF_API: &str = "https://huggingface.co/api";
@@ -553,11 +553,6 @@ fn urlencode(s: &str) -> String {
             _ => format!("%{b:02X}"),
         })
         .collect()
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DownloadRequest {
-    pub id: u64,
 }
 
 #[cfg(test)]
