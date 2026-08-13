@@ -39,22 +39,43 @@ fn scan_models(extra_dirs: Vec<String>) -> Vec<ModelEntry> {
 /// by refusing to start after a long model load.
 #[tauri::command]
 fn draft_candidates(
+    telemetry: State<'_, TelemetryState>,
     target_path: String,
     extra_dirs: Vec<String>,
+    ctx_size: Option<u32>,
 ) -> Result<Vec<speculative::DraftCandidate>, String> {
     let path = std::path::Path::new(&target_path);
     let target = gguf::read_gguf_metadata(path).map_err(|e| e.to_string())?;
     let target_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-    let mut dirs = settings::load().extra_model_dirs;
+    let cfg = settings::load();
+    let mut dirs = cfg.extra_model_dirs.clone();
     dirs.extend(extra_dirs);
     let models = scanner::scan_models(&dirs);
+
+    // Budget the pair against the real card when there is one. Without a GPU
+    // the ranking still works — it just cannot say whether a pair fits, so it
+    // falls back to comparing compute cost.
+    let gpu_total = telemetry
+        .snapshot()
+        .gpus
+        .first()
+        .map(|g| g.vram_total_bytes)
+        .unwrap_or(0);
+    let pair_ctx = (gpu_total > 0).then(|| speculative::PairContext {
+        gpu_total_bytes: gpu_total,
+        // Both caches are sized at the working context, so this has to match
+        // what the server will actually be launched with.
+        ctx: ctx_size.unwrap_or(8192) as u64,
+        kv: estimator::KvType::parse(cfg.kv_cache_type.as_deref()),
+    });
 
     Ok(speculative::rank_drafts(
         &target_path,
         &target,
         target_size,
         &models,
+        pair_ctx,
     ))
 }
 

@@ -228,6 +228,142 @@ pub fn quant_advice(
     })
 }
 
+/// How a target/draft pair lands on the GPU when speculating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairVerdict {
+    /// Both models fully on the GPU, and the target keeps every layer it had
+    /// on its own. The only shape worth recommending.
+    Fits,
+    /// The pair fits, but only by pushing target layers onto the CPU. Those
+    /// layers now run at a fraction of the speed on *every* token, which is
+    /// almost always a bigger loss than speculation is a win.
+    CostsTargetLayers,
+    /// The pair does not fit. There is no partially-offloaded-draft verdict:
+    /// a draft running partly on CPU is slower than the model it is meant to
+    /// run ahead of, so that configuration is a failure, not an option.
+    TooBig,
+}
+
+/// VRAM arithmetic for running a draft model alongside its target.
+///
+/// Speculation needs both models resident simultaneously, each with its own KV
+/// cache. The interesting number is not "does it fit" but what it *costs*: a
+/// draft that fits only by evicting target layers to system RAM slows down
+/// every token the target produces, which no accept rate repays.
+#[derive(Debug, Clone, Serialize)]
+pub struct PairEstimate {
+    pub verdict: PairVerdict,
+    pub ctx_size: u32,
+    pub target_layers_on_gpu: u32,
+    pub target_layers_total: u32,
+    /// Target layers that were on the GPU without a draft and are not with
+    /// one. This is the real price of speculating.
+    pub target_layers_evicted: u32,
+    pub draft_layers_on_gpu: u32,
+    pub draft_layers_total: u32,
+    pub est_target_bytes: u64,
+    pub est_draft_bytes: u64,
+    pub est_total_bytes: u64,
+    pub budget_bytes: u64,
+    pub notes: Vec<String>,
+}
+
+/// Budget a target and a draft model together on one GPU.
+///
+/// The draft is allocated first and in full. That is not favouritism — a draft
+/// that is partly on the CPU is slower than the model it is drafting for,
+/// making the whole exercise pointless, so there is no useful configuration in
+/// which the draft is partially offloaded. Whatever remains goes to the
+/// target, and the layers it loses are reported.
+///
+/// Both models are charged `OVERHEAD_BYTES` for compute buffers. Two loaded
+/// models really do mean two sets of them; charging the draft the same flat
+/// allowance as the target overstates its cost, which is the safe direction
+/// for a recommendation — this predicts "won't fit" slightly too eagerly
+/// rather than promising a pair that then OOMs.
+///
+/// The draft's KV cache is sized at the *target's* context. llama-server does
+/// not expose a separate draft context length, and assuming the full window is
+/// the conservative reading.
+pub fn estimate_pair(
+    target: &ModelShape,
+    draft: &ModelShape,
+    ctx: u64,
+    gpu_total: u64,
+    kv: KvType,
+) -> PairEstimate {
+    let budget = (gpu_total as f64 * VRAM_HEADROOM) as u64;
+    let mut notes: Vec<String> = Vec::new();
+
+    // What the target manages on its own, so the cost of adding a draft can be
+    // stated rather than guessed at.
+    let baseline_layers = max_layers_at(target, ctx, budget, kv);
+
+    let draft_weights = weights_bytes(draft, draft.n_layers);
+    let draft_kv = kv_bytes(draft, ctx, draft.n_layers, kv);
+    let draft_total = draft_weights + draft_kv + OVERHEAD_BYTES;
+
+    let base = |verdict, target_layers: u64, draft_layers: u64, target_bytes: u64| PairEstimate {
+        verdict,
+        ctx_size: ctx.min(u32::MAX as u64) as u32,
+        target_layers_on_gpu: target_layers.min(u32::MAX as u64) as u32,
+        target_layers_total: target.n_layers.min(u32::MAX as u64) as u32,
+        target_layers_evicted: baseline_layers.saturating_sub(target_layers).min(u32::MAX as u64)
+            as u32,
+        draft_layers_on_gpu: draft_layers.min(u32::MAX as u64) as u32,
+        draft_layers_total: draft.n_layers.min(u32::MAX as u64) as u32,
+        est_target_bytes: target_bytes,
+        est_draft_bytes: draft_total,
+        est_total_bytes: target_bytes + draft_total,
+        budget_bytes: budget,
+        notes: Vec::new(),
+    };
+
+    if draft_total > budget {
+        notes.push("the draft model alone does not fit in VRAM".into());
+        let mut e = base(PairVerdict::TooBig, 0, 0, 0);
+        e.notes = notes;
+        return e;
+    }
+
+    let remaining = budget - draft_total;
+    let target_layers = max_layers_at(target, ctx, remaining, kv);
+    let target_bytes = if target_layers > 0 {
+        weights_bytes(target, target_layers) + kv_bytes(target, ctx, target_layers, kv) + OVERHEAD_BYTES
+    } else {
+        0
+    };
+
+    let verdict = if target_layers == 0 {
+        notes.push("no room left for the target model once the draft is loaded".into());
+        PairVerdict::TooBig
+    } else if target_layers < baseline_layers {
+        notes.push(format!(
+            "speculating costs {} target layer(s): {baseline_layers} fit alone, {target_layers} with the draft",
+            baseline_layers - target_layers
+        ));
+        PairVerdict::CostsTargetLayers
+    } else {
+        // No layers lost. The target may still be partially offloaded, but
+        // that was already true before the draft was added, so it is not a
+        // cost of speculating — worth saying out loud rather than letting
+        // "Fits" imply everything is on the GPU.
+        if target_layers < target.n_layers {
+            notes.push(format!(
+                "the draft is free here, but the target was already partial: \
+                 {target_layers}/{} layers on GPU",
+                target.n_layers
+            ));
+        }
+        PairVerdict::Fits
+    };
+
+    let mut e = base(verdict, target_layers, draft.n_layers, target_bytes);
+    e.notes = notes;
+    e
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VramEstimate {
     pub fits: bool,
@@ -722,5 +858,153 @@ mod kv_quant {
         // that the server will not actually have room for.
         assert_eq!(KvType::parse(Some("nonsense")), KvType::F16);
         assert_eq!(KvType::parse(None), KvType::F16);
+    }
+}
+
+#[cfg(test)]
+mod spec_pair {
+    use super::*;
+
+    fn shape(file_size: u64, n_layers: u64) -> ModelShape {
+        ModelShape {
+            file_size,
+            n_layers,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 131072,
+        }
+    }
+
+    fn shape_7b() -> ModelShape {
+        shape(4_300_000_000, 32)
+    }
+
+    /// A plausible small draft: ~0.6B at Q4, few layers.
+    fn draft_shape() -> ModelShape {
+        ModelShape {
+            file_size: 500_000_000,
+            n_layers: 28,
+            n_head_kv: 8,
+            head_dim_k: 128,
+            head_dim_v: 128,
+            native_ctx: 32768,
+        }
+    }
+
+    #[test]
+    fn a_small_draft_on_a_big_gpu_costs_the_target_nothing() {
+        let e = estimate_pair(
+            &shape_7b(),
+            &draft_shape(),
+            8192,
+            24 * 1_000_000_000,
+            KvType::F16,
+        );
+        assert_eq!(e.verdict, PairVerdict::Fits);
+        assert_eq!(e.target_layers_evicted, 0);
+        assert_eq!(e.target_layers_on_gpu, 32);
+        assert_eq!(e.draft_layers_on_gpu, 28);
+        assert!(e.est_total_bytes <= e.budget_bytes);
+    }
+
+    /// The verdict that matters. On a GPU where the target only just fits,
+    /// adding a draft has to come out of the target's layers — and layers
+    /// pushed to the CPU slow down every token, which no accept rate repays.
+    #[test]
+    fn a_draft_that_evicts_target_layers_is_called_out() {
+        let target = shape(10_000_000_000, 40);
+        let alone = estimate(&target, 12 * 1_000_000_000, 12 * 1_000_000_000, KvType::F16, vec![]);
+        let pair = estimate_pair(
+            &target,
+            &draft_shape(),
+            8192,
+            12 * 1_000_000_000,
+            KvType::F16,
+        );
+        assert_eq!(pair.verdict, PairVerdict::CostsTargetLayers);
+        assert!(
+            pair.target_layers_evicted > 0,
+            "expected the draft to cost layers; target alone got {}",
+            alone.n_gpu_layers
+        );
+        assert!(pair.notes.iter().any(|n| n.contains("costs")));
+    }
+
+    #[test]
+    fn a_draft_too_big_for_the_gpu_is_rejected_outright() {
+        let e = estimate_pair(
+            &shape_7b(),
+            &shape(30_000_000_000, 60),
+            8192,
+            8 * 1_000_000_000,
+            KvType::F16,
+        );
+        assert_eq!(e.verdict, PairVerdict::TooBig);
+        assert_eq!(e.target_layers_on_gpu, 0);
+    }
+
+    /// The draft's cache is charged at the target's context, so a longer
+    /// window costs VRAM twice over. That compounding is the whole reason
+    /// speculation can stop fitting as context grows.
+    #[test]
+    fn draft_kv_scales_with_the_targets_context() {
+        let short = estimate_pair(
+            &shape_7b(),
+            &draft_shape(),
+            2048,
+            24 * 1_000_000_000,
+            KvType::F16,
+        );
+        let long = estimate_pair(
+            &shape_7b(),
+            &draft_shape(),
+            16384,
+            24 * 1_000_000_000,
+            KvType::F16,
+        );
+        assert!(
+            long.est_draft_bytes > short.est_draft_bytes,
+            "draft KV must grow with context: {} vs {}",
+            short.est_draft_bytes,
+            long.est_draft_bytes
+        );
+    }
+
+    #[test]
+    fn quantized_kv_buys_back_room_for_the_pair() {
+        let f16 = estimate_pair(
+            &shape_7b(),
+            &draft_shape(),
+            32768,
+            12 * 1_000_000_000,
+            KvType::F16,
+        );
+        let q8 = estimate_pair(
+            &shape_7b(),
+            &draft_shape(),
+            32768,
+            12 * 1_000_000_000,
+            KvType::Q8_0,
+        );
+        assert!(
+            q8.est_total_bytes < f16.est_total_bytes,
+            "q8_0 must shrink the pair's footprint"
+        );
+        assert!(q8.target_layers_on_gpu >= f16.target_layers_on_gpu);
+    }
+
+    /// A target that was already partially offloaded before any draft existed
+    /// should not have that blamed on the draft.
+    #[test]
+    fn a_pre_existing_partial_target_is_not_charged_to_the_draft() {
+        let target = shape(20_000_000_000, 60);
+        let gpu = 10 * 1_000_000_000;
+        let alone = max_layers_at(&target, 8192, (gpu as f64 * VRAM_HEADROOM) as u64, KvType::F16);
+        assert!(alone > 0 && alone < 60, "target must start out partial");
+        let pair = estimate_pair(&target, &draft_shape(), 8192, gpu, KvType::F16);
+        if pair.target_layers_evicted == 0 && pair.verdict == PairVerdict::Fits {
+            assert!(pair.notes.iter().any(|n| n.contains("already partial")));
+        }
     }
 }
