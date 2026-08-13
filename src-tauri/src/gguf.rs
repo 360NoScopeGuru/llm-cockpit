@@ -83,6 +83,23 @@ impl GgufValue {
             _ => None,
         }
     }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            GgufValue::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    /// Element count of an array value. The elements themselves were skipped
+    /// during parsing, but the length was recorded — which is what makes the
+    /// vocab size free to read even though the tokens were never allocated.
+    pub fn as_array_len(&self) -> Option<u64> {
+        match self {
+            GgufValue::Array { len, .. } => Some(*len),
+            _ => None,
+        }
+    }
 }
 
 /// The subset of GGUF metadata the cockpit cares about, plus the raw KV map for
@@ -106,9 +123,30 @@ pub struct GgufMetadata {
     pub value_length: Option<u64>,
     pub parameter_count: Option<u64>,
     pub size_label: Option<String>,
+    /// Mixture-of-experts layout. When `expert_count` is set, only
+    /// `expert_used_count` of the experts run per token, so total parameters
+    /// (and file size) badly overstate the per-token cost — which matters when
+    /// judging whether one model can usefully draft for another.
+    pub expert_count: Option<u64>,
+    pub expert_used_count: Option<u64>,
     /// For sharded models: total shard count and this file's 1-based index.
     pub split_count: Option<u64>,
     pub split_no: Option<u64>,
+
+    // ---- tokenizer identity -------------------------------------------------
+    // Read for speculative decoding: llama.cpp refuses to pair a draft model
+    // with a target whose tokenizer disagrees, and every one of its checks
+    // except the per-token text comparison can be answered from metadata
+    // alone. See `speculative.rs`.
+    /// `tokenizer.ggml.model` — the vocab *type* ("gpt2", "llama", "bpe", …).
+    pub vocab_type: Option<String>,
+    /// Token count, taken from the length of the `tokenizer.ggml.tokens`
+    /// array. Free: the array body is skipped, but its length is recorded.
+    pub vocab_size: Option<u64>,
+    pub bos_token_id: Option<u64>,
+    pub eos_token_id: Option<u64>,
+    pub add_bos_token: Option<bool>,
+    pub add_eos_token: Option<bool>,
 }
 
 /// GGUF metadata value type tags.
@@ -315,12 +353,29 @@ pub fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata, GgufErro
         key_length: arch_key("attention.key_length"),
         value_length: arch_key("attention.value_length"),
         parameter_count: kv.get("general.parameter_count").and_then(|v| v.as_u64()),
+        expert_count: arch_key("expert_count"),
+        expert_used_count: arch_key("expert_used_count"),
         size_label: kv
             .get("general.size_label")
             .and_then(|v| v.as_string())
             .map(str::to_owned),
         split_count: kv.get("split.count").and_then(|v| v.as_u64()),
         split_no: kv.get("split.no").and_then(|v| v.as_u64()),
+        vocab_type: kv
+            .get("tokenizer.ggml.model")
+            .and_then(|v| v.as_string())
+            .map(str::to_owned),
+        vocab_size: kv
+            .get("tokenizer.ggml.tokens")
+            .and_then(|v| v.as_array_len()),
+        bos_token_id: kv.get("tokenizer.ggml.bos_token_id").and_then(|v| v.as_u64()),
+        eos_token_id: kv.get("tokenizer.ggml.eos_token_id").and_then(|v| v.as_u64()),
+        add_bos_token: kv
+            .get("tokenizer.ggml.add_bos_token")
+            .and_then(|v| v.as_bool()),
+        add_eos_token: kv
+            .get("tokenizer.ggml.add_eos_token")
+            .and_then(|v| v.as_bool()),
         architecture,
     })
 }
