@@ -13,6 +13,7 @@ mod ollama;
 mod runtime;
 mod scanner;
 mod settings;
+mod speculative;
 mod telemetry;
 mod tools;
 
@@ -31,6 +32,30 @@ fn scan_models(extra_dirs: Vec<String>) -> Vec<ModelEntry> {
     let mut dirs = settings::load().extra_model_dirs;
     dirs.extend(extra_dirs);
     scanner::scan_models(&dirs)
+}
+
+/// Rank the local library as draft models for `target_path`, for speculative
+/// decoding. Answers up front what `llama-server` would otherwise only tell you
+/// by refusing to start after a long model load.
+#[tauri::command]
+fn draft_candidates(
+    target_path: String,
+    extra_dirs: Vec<String>,
+) -> Result<Vec<speculative::DraftCandidate>, String> {
+    let path = std::path::Path::new(&target_path);
+    let target = gguf::read_gguf_metadata(path).map_err(|e| e.to_string())?;
+    let target_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+
+    let mut dirs = settings::load().extra_model_dirs;
+    dirs.extend(extra_dirs);
+    let models = scanner::scan_models(&dirs);
+
+    Ok(speculative::rank_drafts(
+        &target_path,
+        &target,
+        target_size,
+        &models,
+    ))
 }
 
 /// Report all scan roots — defaults plus persisted user folders — and whether
@@ -434,6 +459,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             scan_models,
             scan_roots,
+            draft_candidates,
             add_model_dir,
             remove_model_dir,
             get_settings,

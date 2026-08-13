@@ -135,7 +135,7 @@ const QUANT_LADDER: &[(&str, f64)] = &[
     ("Q2_K", 2.63),
 ];
 
-fn bpw_for(label: &str) -> Option<f64> {
+pub(crate) fn bpw_for(label: &str) -> Option<f64> {
     // Match loosely: "Q4_K_M" but also mixed labels like "Q4_K - Medium".
     let up = label.to_ascii_uppercase();
     QUANT_LADDER
