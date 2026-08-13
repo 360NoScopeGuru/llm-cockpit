@@ -1,0 +1,58 @@
+name: CI
+
+# Checks every change before it reaches master.
+#
+# This exists because `release.yml` only runs on a version tag, which meant the
+# test suite ran once per release and a regression could sit on master for
+# weeks. Same checks as the release job, minus the installer build.
+#
+# Runs on windows-latest rather than ubuntu because Tokamak is a Windows app —
+# path handling, the reserved-name tests in `downloads.rs`, and NVML are all
+# platform-specific, so a green Linux run would not mean much.
+
+on:
+  pull_request:
+    branches: [master]
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# A second push to the same PR makes the first run irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      # `npm run build` is `tsc && vite build`, so this is the frontend typecheck.
+      - name: Typecheck and build frontend
+        run: npm run build
+
+      # -D warnings is what keeps dead code from accumulating: two unused items
+      # survived from July precisely because nothing failed on a warning.
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --locked

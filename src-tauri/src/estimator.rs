@@ -58,14 +58,6 @@ impl KvType {
             _ => KvType::F16,
         }
     }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            KvType::F16 => "f16",
-            KvType::Q8_0 => "q8_0",
-            KvType::Q4_0 => "q4_0",
-        }
-    }
 }
 
 /// Context to aim for when a model cannot be fully offloaded. Below this,
@@ -722,7 +714,7 @@ mod kv_quant {
     }
 
     #[test]
-    fn parses_and_round_trips_names() {
+    fn parses_names() {
         assert_eq!(KvType::parse(Some("q8_0")), KvType::Q8_0);
         assert_eq!(KvType::parse(Some("Q4_0")), KvType::Q4_0);
         assert_eq!(KvType::parse(Some("f16")), KvType::F16);
@@ -730,6 +722,5 @@ mod kv_quant {
         // that the server will not actually have room for.
         assert_eq!(KvType::parse(Some("nonsense")), KvType::F16);
         assert_eq!(KvType::parse(None), KvType::F16);
-        assert_eq!(KvType::Q8_0.as_str(), "q8_0");
     }
 }

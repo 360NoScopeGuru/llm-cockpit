@@ -168,7 +168,7 @@ pub fn scan_models(extra_dirs: &[String]) -> Vec<ModelEntry> {
         entries.push(entry);
     }
 
-    entries.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase()));
+    entries.sort_by_cached_key(|e| e.file_name.to_lowercase());
     entries
 }
 

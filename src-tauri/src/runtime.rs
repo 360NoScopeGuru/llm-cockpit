@@ -254,10 +254,12 @@ pub fn install(window: tauri::Window, build: RuntimeBuild) {
     });
 }
 
-fn do_install(
-    build: &RuntimeBuild,
-    emit: &dyn Fn(&str, u64, u64, bool, Option<String>),
-) -> Result<(), String> {
+/// Progress sink: `(stage, received, total, done, error)`. Taken as a trait
+/// object so the install can be driven either by the real Tauri emitter or by
+/// a no-op in tests.
+type ProgressSink<'a> = &'a dyn Fn(&str, u64, u64, bool, Option<String>);
+
+fn do_install(build: &RuntimeBuild, emit: ProgressSink<'_>) -> Result<(), String> {
     let dir = runtime_dir()?;
     let tag = fs::read_to_string(dir.join("VERSION.pending")).unwrap_or_default();
     let base = format!(

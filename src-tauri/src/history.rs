@@ -183,7 +183,7 @@ pub fn list() -> Result<Vec<SessionMeta>, String> {
             avg_decode_tok_s: avg,
         });
     }
-    out.sort_by(|a, b| b.updated_ms.cmp(&a.updated_ms));
+    out.sort_by_key(|s| std::cmp::Reverse(s.updated_ms));
     Ok(out)
 }
 
