@@ -1,6 +1,8 @@
 # Tokamak
 
-**A reactor room for your local LLMs.**
+**The local LLM app that shows its work.**
+
+Know what fits on your GPU before you download it.
 
 [![Release](https://img.shields.io/github/v/release/360NoScopeGuru/tokamak?style=flat-square&color=eda03f&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/360NoScopeGuru/tokamak/release.yml?style=flat-square&color=86b95e&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/actions)

@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Tokamak app mark.
+       A poloidal cross-section: slice a torus vertically and you get two
+       D-shaped plasma chambers flanking the central solenoid.
+
+       Three decisions, each made against a rendered size ladder rather than
+       at 512px where everything looks fine:
+        - Two chambers, not one. A single D reads as the letter "D", and with
+          a centre-line beside it, as "ID".
+        - Solid, not outlined. Outlined chambers collapse into "0I0" at 16px;
+          mass survives where strokes do not.
+        - Nothing inside the chambers. A dot in each became a pair of eyes.
+
+       The straight inboard edge is what keeps these D-sections rather than
+       lozenges, so it is a true vertical with square corners. -->
+
+  <defs>
+    <linearGradient id="vessel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd79b"/>
+      <stop offset="1" stop-color="#e0872f"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="96" fill="#08080a"/>
+
+  <!-- Outboard chamber. -->
+  <path d="M306 112 L362 112 C414 127 440 184 440 256
+           C440 328 414 385 362 400 L306 400 Z" fill="url(#vessel)"/>
+
+  <!-- Inboard chamber, mirrored about the machine axis. -->
+  <path d="M206 112 L150 112 C98 127 72 184 72 256
+           C72 328 98 385 150 400 L206 400 Z" fill="url(#vessel)"/>
+
+  <!-- Central solenoid. Full brightness so it still reads at 16px, where a
+       dimmer column merges into the dark channel. The 32px voids either side
+       are deliberate: below about 24px they are the only thing keeping this
+       from fusing into a single blob. -->
+  <rect x="238" y="100" width="36" height="312" rx="18" fill="#ffbe64"/>
+</svg>
