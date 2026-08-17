@@ -56,12 +56,67 @@ pub struct LlamaServerConfig {
     /// `finish_reason: "length"` rather than degrade gracefully.
     #[serde(default)]
     pub context_shift: bool,
+
+    /// Draft model for speculative decoding. When set, llama-server runs this
+    /// small model ahead of the main one and verifies several of its guesses
+    /// per forward pass, so accepted tokens cost almost nothing.
+    ///
+    /// The remaining `draft_*` fields are ignored unless this is set.
+    #[serde(default)]
+    pub draft_model_path: Option<String>,
+    /// Tokens to draft per step (llama.cpp's default is 3). Higher wins more
+    /// when the draft is accurate and wastes more when it is not.
+    #[serde(default)]
+    pub draft_n_max: Option<u32>,
+    #[serde(default)]
+    pub draft_n_min: Option<u32>,
+    /// Minimum draft-token probability to bother speculating on.
+    #[serde(default)]
+    pub draft_p_min: Option<f32>,
+    /// GPU layers for the draft. A draft on the CPU is slower than the model
+    /// it is drafting for, so this normally wants to be all of them.
+    #[serde(default)]
+    pub draft_n_gpu_layers: Option<u32>,
+    /// The draft keeps its own KV cache, quantizable independently.
+    #[serde(default)]
+    pub draft_cache_type_k: Option<String>,
+    #[serde(default)]
+    pub draft_cache_type_v: Option<String>,
+
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
 
 fn default_port() -> u16 {
     8137
+}
+
+/// Everything off, port at the app default. Exists so that callers building a
+/// config can name only the fields they care about — this struct grows a field
+/// every time llama-server gains a launch knob, and without this every
+/// construction site has to be touched for a flag it does not use.
+impl Default for LlamaServerConfig {
+    fn default() -> Self {
+        LlamaServerConfig {
+            model_path: String::new(),
+            n_gpu_layers: None,
+            ctx_size: None,
+            port: default_port(),
+            binary_path: None,
+            flash_attn: false,
+            cache_type_k: None,
+            cache_type_v: None,
+            context_shift: false,
+            draft_model_path: None,
+            draft_n_max: None,
+            draft_n_min: None,
+            draft_p_min: None,
+            draft_n_gpu_layers: None,
+            draft_cache_type_k: None,
+            draft_cache_type_v: None,
+            extra_args: Vec::new(),
+        }
+    }
 }
 
 /// Snapshot of the manager state for the UI.
@@ -339,6 +394,53 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
     if cfg.context_shift {
         args.push("--context-shift".into());
     }
+
+    // Speculative decoding. The `--spec-draft-*` spelling is the current one:
+    // llama.cpp *removed* `--draft-max`/`--draft-min`, and every build this app
+    // can reach (managed b10242, LM Studio 2.23.1 and 2.24.0) keeps them only
+    // as stubs that error with "the argument has been removed". Emitting the
+    // old names would fail on all of them, so there is deliberately no
+    // fallback spelling here — a binary old enough to need one would fail
+    // loudly rather than silently ignoring the draft.
+    if let Some(draft) = &cfg.draft_model_path {
+        args.push("--spec-draft-model".into());
+        args.push(draft.clone());
+        if let Some(n) = cfg.draft_n_max {
+            args.push("--spec-draft-n-max".into());
+            args.push(n.to_string());
+        }
+        if let Some(n) = cfg.draft_n_min {
+            args.push("--spec-draft-n-min".into());
+            args.push(n.to_string());
+        }
+        if let Some(p) = cfg.draft_p_min {
+            args.push("--spec-draft-p-min".into());
+            args.push(p.to_string());
+        }
+        if let Some(ngl) = cfg.draft_n_gpu_layers {
+            args.push("--spec-draft-ngl".into());
+            args.push(ngl.to_string());
+        }
+        // Quantized KV needs flash attention, same as the main cache above;
+        // by this point `-fa` has already been forced on if either cache is
+        // quantized, so only add it if the draft is the sole reason.
+        let draft_kv_quantized =
+            cfg.draft_cache_type_k.is_some() || cfg.draft_cache_type_v.is_some();
+        let main_kv_quantized = cfg.cache_type_k.is_some() || cfg.cache_type_v.is_some();
+        if draft_kv_quantized && !main_kv_quantized && !cfg.flash_attn {
+            args.push("-fa".into());
+            args.push("on".into());
+        }
+        if let Some(k) = &cfg.draft_cache_type_k {
+            args.push("--spec-draft-type-k".into());
+            args.push(k.clone());
+        }
+        if let Some(v) = &cfg.draft_cache_type_v {
+            args.push("--spec-draft-type-v".into());
+            args.push(v.clone());
+        }
+    }
+
     args.extend(cfg.extra_args.iter().cloned());
     args
 }
@@ -568,6 +670,7 @@ mod tests {
             cache_type_v: None,
             context_shift: false,
             extra_args: vec!["--verbose".into()],
+            ..Default::default()
         };
         let args = build_args(&cfg);
         assert_eq!(args[0], "--model");
@@ -576,6 +679,87 @@ mod tests {
         assert!(args.windows(2).any(|w| w[0] == "-c" && w[1] == "8192"));
         assert!(args.contains(&"-fa".to_string()));
         assert!(args.contains(&"--verbose".to_string()));
+    }
+
+    /// Helper: find the value following a flag, if the flag is present.
+    fn val_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.windows(2)
+            .find(|w| w[0] == flag)
+            .map(|w| w[1].as_str())
+    }
+
+    #[test]
+    fn speculative_decoding_uses_the_current_flag_spelling() {
+        let cfg = LlamaServerConfig {
+            model_path: "target.gguf".into(),
+            draft_model_path: Some("draft.gguf".into()),
+            draft_n_max: Some(5),
+            draft_n_min: Some(1),
+            draft_n_gpu_layers: Some(99),
+            ..Default::default()
+        };
+        let args = build_args(&cfg);
+        assert_eq!(val_after(&args, "--spec-draft-model"), Some("draft.gguf"));
+        assert_eq!(val_after(&args, "--spec-draft-n-max"), Some("5"));
+        assert_eq!(val_after(&args, "--spec-draft-n-min"), Some("1"));
+        assert_eq!(val_after(&args, "--spec-draft-ngl"), Some("99"));
+
+        // llama.cpp removed these; emitting one would make the server exit
+        // with "the argument has been removed" instead of speculating.
+        for dead in ["--draft-max", "--draft-min", "--draft", "--draft-n"] {
+            assert!(
+                !args.iter().any(|a| a == dead),
+                "must not emit the removed flag {dead}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_draft_flags_without_a_draft_model() {
+        // The knobs are meaningless alone, and passing them without
+        // --spec-draft-model would be a launch failure rather than a no-op.
+        let cfg = LlamaServerConfig {
+            model_path: "m.gguf".into(),
+            draft_n_max: Some(5),
+            draft_cache_type_k: Some("q8_0".into()),
+            ..Default::default()
+        };
+        let args = build_args(&cfg);
+        assert!(!args.iter().any(|a| a.starts_with("--spec-draft")));
+    }
+
+    #[test]
+    fn a_quantized_draft_cache_forces_flash_attention_on() {
+        let cfg = LlamaServerConfig {
+            model_path: "m.gguf".into(),
+            draft_model_path: Some("d.gguf".into()),
+            draft_cache_type_k: Some("q8_0".into()),
+            draft_cache_type_v: Some("q8_0".into()),
+            ..Default::default()
+        };
+        let args = build_args(&cfg);
+        assert_eq!(val_after(&args, "-fa"), Some("on"), "quantized KV needs -fa");
+        assert_eq!(val_after(&args, "--spec-draft-type-k"), Some("q8_0"));
+        assert_eq!(val_after(&args, "--spec-draft-type-v"), Some("q8_0"));
+    }
+
+    /// `-fa` must not be passed twice when both caches are quantized: the main
+    /// cache already forces it on further up.
+    #[test]
+    fn flash_attention_is_only_forced_once() {
+        let cfg = LlamaServerConfig {
+            model_path: "m.gguf".into(),
+            cache_type_k: Some("q8_0".into()),
+            draft_model_path: Some("d.gguf".into()),
+            draft_cache_type_k: Some("q8_0".into()),
+            ..Default::default()
+        };
+        let args = build_args(&cfg);
+        assert_eq!(
+            args.iter().filter(|a| *a == "-fa").count(),
+            1,
+            "got: {args:?}"
+        );
     }
 
     #[test]
@@ -591,6 +775,7 @@ mod tests {
             cache_type_v: None,
             context_shift: false,
             extra_args: vec![],
+            ..Default::default()
         };
         let args = build_args(&cfg);
         assert!(!args.contains(&"-ngl".to_string()));
@@ -611,6 +796,7 @@ mod tests {
             cache_type_v: Some("q8_0".into()),
             context_shift: true,
             extra_args: vec![],
+            ..Default::default()
         };
         let args = build_args(&cfg);
         assert!(args.windows(2).any(|w| w[0] == "-ctk" && w[1] == "q8_0"));
@@ -688,6 +874,7 @@ llamacpp:requests_processing 1
             cache_type_v: None,
             context_shift: false,
             extra_args: vec![],
+            ..Default::default()
         };
 
         let started = mgr.start(cfg).expect("start should succeed");
@@ -739,5 +926,34 @@ llamacpp:requests_processing 1
 
         mgr.stop().expect("stop should succeed");
         println!("stopped");
+    }
+}
+
+#[cfg(test)]
+mod discovery_probe {
+    use super::*;
+
+    /// What this machine's binary discovery actually resolves to, best first.
+    /// Ignored by default (machine-dependent); run with:
+    ///   cargo test -- --ignored --nocapture what_binary_would_we_use
+    #[test]
+    #[ignore]
+    fn what_binary_would_we_use() {
+        let all = resolve_binaries();
+        println!("\n--- {} binary(ies), best first ---", all.len());
+        for b in &all {
+            println!(
+                "  rank {:>4}  {:<8} {:<28} {}",
+                b.rank, b.backend, b.label, b.path
+            );
+        }
+        if let Some(best) = best_binary() {
+            println!("\nbest_binary() -> {} [{}]", best.label, best.backend);
+            let dirs = dll_search_dirs(std::path::Path::new(&best.path));
+            println!("dll search dirs ({}):", dirs.len());
+            for d in dirs {
+                println!("   {}", d.display());
+            }
+        }
     }
 }
