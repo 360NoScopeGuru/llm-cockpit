@@ -102,6 +102,7 @@ fn benchmark_one(model_path: &str, cfg: &BenchConfig) -> BenchResult {
         cache_type_v: None,
         context_shift: false,
         extra_args: vec![],
+        ..Default::default()
     };
 
     let start = Instant::now();
