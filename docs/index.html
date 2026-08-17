@@ -3,14 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Tokamak — a reactor room for your local LLMs</title>
-<meta name="description" content="A Windows desktop app for running local LLMs: hardware-aware auto-config, a quant advisor, measured benchmarks and a live telemetry cockpit. Includes a working VRAM solver you can drive in the browser.">
-<meta property="og:title" content="Tokamak — a reactor room for your local LLMs">
-<meta property="og:description" content="Hardware-aware auto-config, measured benchmarks, quant advisor and live GPU telemetry for llama.cpp. No lock-in, plain GGUF.">
+<title>Tokamak — the local LLM app that shows its work</title>
+<meta name="description" content="A Windows desktop app for running local LLMs that shows the arithmetic: what fits on your GPU, at what context, and what each quant costs — before you download anything. Hardware-aware auto-config, measured benchmarks, live telemetry. The VRAM solver on this page runs the app's real estimator.">
+<meta property="og:title" content="Tokamak — the local LLM app that shows its work">
+<meta property="og:description" content="Know what fits on your GPU before you download it. Hardware-aware auto-config, quant advice, measured benchmarks and live telemetry for llama.cpp. No lock-in, plain GGUF.">
 <meta property="og:type" content="website">
-<meta property="og:image" content="https://360noscopeguru.github.io/tokamak/img/cockpit.png">
+<meta property="og:image" content="https://360noscopeguru.github.io/tokamak/img/og.png">
 <meta name="theme-color" content="#ece7dc">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%23a33418' stroke-width='2'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%23a33418'/%3E%3C/svg%3E">
+<!-- The app mark: a poloidal section, two D chambers either side of the
+     solenoid. Same shape as the installer icon so the tab, the taskbar and
+     the download all agree. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M19.1 7h3.5c3.2 1 5 4.5 5 9s-1.8 8-5 9h-3.5z' fill='%23a33418'/%3E%3Cpath d='M12.9 7H9.4c-3.2 1-5 4.5-5 9s1.8 8 5 9h3.5z' fill='%23a33418'/%3E%3Crect x='14.9' y='6.2' width='2.2' height='19.6' rx='1.1' fill='%23a33418'/%3E%3C/svg%3E">
 <style>
 /* ============================================================================
    Tokamak — "COLD START → IGNITION"
@@ -446,7 +449,11 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
     <div class="meta">DRAWING TKMK-0102 · REV C · SCALE 1:1 · SHEET 1 OF 7 · MPL-2.0</div>
     <div class="hgrid">
       <div class="hcol" data-draw>
-        <h1>A REACTOR ROOM<br>FOR YOUR LOCAL<br>LLMS.</h1>
+        <!-- Line breaks are explicit because the type size is solved against
+             the longest line: 14 characters at Departure Mono's 0.636 em
+             advance is what 10.4cqi is calibrated to. Keep every line at or
+             under 14 characters or re-derive the clamp in the h1 rule. -->
+        <h1>THE LOCAL LLM<br>APP THAT SHOWS<br>ITS WORK.</h1>
         <p class="lede">
           Tokamak finds the GGUF models already on your disk, works out the best
           way to run each one on your GPU, launches them through llama.cpp, and
