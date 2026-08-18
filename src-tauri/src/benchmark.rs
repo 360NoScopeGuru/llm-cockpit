@@ -38,10 +38,41 @@ How razorback jumping frogs can level six piqued gymnasts. Summarize the above."
 /// How long to wait for a config's server to become healthy before giving up.
 const HEALTH_TIMEOUT_SECS: u64 = 90;
 
-#[derive(Debug, Clone, Deserialize)]
+/// `Default` is for construction sites only — `n_gpu_layers` and `ctx_size`
+/// have no `serde(default)`, so a config arriving from the frontend still has
+/// to state them.
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct BenchConfig {
     pub n_gpu_layers: u32,
     pub ctx_size: u32,
+    /// Draft model for speculative decoding. When set, this config is run
+    /// *twice* — once without the draft and once with — because the only
+    /// honest way to report a speedup is to measure both ends on the same
+    /// machine, back to back.
+    #[serde(default)]
+    pub draft_model_path: Option<String>,
+    /// Tokens to draft per step. `None` leaves llama.cpp's default of 3.
+    #[serde(default)]
+    pub draft_n_max: Option<u32>,
+}
+
+/// What speculative decoding actually bought, measured rather than predicted.
+#[derive(Debug, Clone, Serialize)]
+pub struct SpecResult {
+    /// Tokens the draft model proposed.
+    pub draft_n: u64,
+    /// How many of those the target accepted.
+    pub draft_n_accepted: u64,
+    /// `draft_n_accepted / draft_n`. The number that decides whether a draft
+    /// is worth its VRAM: rejected tokens are wasted work on both models.
+    pub accept_rate: f64,
+    /// Decode speed for the identical config with no draft model.
+    pub baseline_decode_tok_s: f64,
+    /// Decode speed with the draft.
+    pub decode_tok_s: f64,
+    /// `decode / baseline`. Below 1.0 means the draft made generation slower,
+    /// which is a real and common outcome — it is reported, not hidden.
+    pub speedup: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -53,6 +84,9 @@ pub struct BenchResult {
     pub prefill_tok_s: f64,
     pub decode_tok_s: f64,
     pub peak_vram_bytes: u64,
+    /// Present only when the config named a draft model and both halves of
+    /// the A/B ran.
+    pub speculative: Option<SpecResult>,
     pub error: Option<String>,
 }
 
@@ -66,6 +100,7 @@ impl BenchResult {
             prefill_tok_s: 0.0,
             decode_tok_s: 0.0,
             peak_vram_bytes: 0,
+            speculative: None,
             error: Some(error),
         }
     }
@@ -80,7 +115,19 @@ pub fn run_benchmark<F: Fn(&BenchResult)>(
 ) -> Vec<BenchResult> {
     let mut results = Vec::new();
     for cfg in configs.iter().take(6) {
-        let result = benchmark_one(model_path, cfg);
+        let mut result = benchmark_one(model_path, cfg, None);
+
+        // A config that names a draft is really two measurements. The run
+        // above is the baseline; run it again with the draft attached and
+        // report the pair. Doing both here, back to back, is what makes the
+        // speedup attributable — comparing against a number measured in some
+        // earlier session would fold in whatever else the GPU was doing.
+        if let (true, Some(draft)) = (result.loaded, cfg.draft_model_path.as_deref()) {
+            thread::sleep(Duration::from_millis(600));
+            let with_draft = benchmark_one(model_path, cfg, Some(draft));
+            result = merge_speculative(result, with_draft);
+        }
+
         on_progress(&result);
         results.push(result);
         // Let the OS fully release the port before the next config binds it.
@@ -89,19 +136,60 @@ pub fn run_benchmark<F: Fn(&BenchResult)>(
     results
 }
 
-fn benchmark_one(model_path: &str, cfg: &BenchConfig) -> BenchResult {
+/// Fold a with-draft run into its baseline, producing one row that carries the
+/// comparison.
+///
+/// The reported prefill/decode/VRAM become the *speculative* ones, since that
+/// is the configuration being proposed; the baseline survives inside
+/// `SpecResult` so the speedup can be checked rather than taken on faith. If
+/// the speculative half failed to load or produced no draft statistics, the
+/// baseline is returned untouched with its error preserved — a broken pair
+/// must not read as "speculation made no difference".
+fn merge_speculative(baseline: BenchResult, spec: BenchResult) -> BenchResult {
+    if !spec.loaded {
+        return BenchResult {
+            error: spec.error.or(baseline.error.clone()),
+            ..baseline
+        };
+    }
+    let (draft_n, draft_n_accepted) = match spec.speculative.as_ref() {
+        Some(s) => (s.draft_n, s.draft_n_accepted),
+        None => (0, 0),
+    };
+    let speedup = if baseline.decode_tok_s > 0.0 {
+        spec.decode_tok_s / baseline.decode_tok_s
+    } else {
+        0.0
+    };
+    BenchResult {
+        speculative: Some(SpecResult {
+            draft_n,
+            draft_n_accepted,
+            accept_rate: if draft_n > 0 {
+                draft_n_accepted as f64 / draft_n as f64
+            } else {
+                0.0
+            },
+            baseline_decode_tok_s: baseline.decode_tok_s,
+            decode_tok_s: spec.decode_tok_s,
+            speedup,
+        }),
+        ..spec
+    }
+}
+
+fn benchmark_one(model_path: &str, cfg: &BenchConfig, draft: Option<&str>) -> BenchResult {
     let mgr = LlamaManager::new();
     let server_cfg = LlamaServerConfig {
         model_path: model_path.to_string(),
         n_gpu_layers: Some(cfg.n_gpu_layers),
         ctx_size: Some(cfg.ctx_size),
         port: BENCH_PORT,
-        binary_path: None,
-        flash_attn: false,
-        cache_type_k: None,
-        cache_type_v: None,
-        context_shift: false,
-        extra_args: vec![],
+        draft_model_path: draft.map(str::to_string),
+        // Offload the whole draft. A draft running on the CPU is slower than
+        // the model it is drafting for, which would measure the wrong thing.
+        draft_n_gpu_layers: draft.map(|_| 999),
+        draft_n_max: cfg.draft_n_max,
         ..Default::default()
     };
 
@@ -161,6 +249,9 @@ fn benchmark_one(model_path: &str, cfg: &BenchConfig) -> BenchResult {
 
     let (prefill_tok_s, decode_tok_s) =
         body.as_deref().and_then(parse_timings).unwrap_or((0.0, 0.0));
+    // Only meaningful on the with-draft half; `merge_speculative` fills in the
+    // baseline and speedup once both halves have run.
+    let draft_stats = draft.and_then(|_| body.as_deref().and_then(parse_draft_stats));
 
     let _ = mgr.stop();
 
@@ -172,6 +263,14 @@ fn benchmark_one(model_path: &str, cfg: &BenchConfig) -> BenchResult {
         prefill_tok_s,
         decode_tok_s,
         peak_vram_bytes,
+        speculative: draft_stats.map(|(draft_n, draft_n_accepted)| SpecResult {
+            draft_n,
+            draft_n_accepted,
+            accept_rate: 0.0,
+            baseline_decode_tok_s: 0.0,
+            decode_tok_s,
+            speedup: 0.0,
+        }),
         error: if body.is_none() {
             Some("generation request failed".into())
         } else {
@@ -212,6 +311,28 @@ fn parse_timings(body: &str) -> Option<(f64, f64)> {
     let prefill = rate(f("prompt_n"), f("prompt_ms"));
     let decode = rate(f("predicted_n"), f("predicted_ms"));
     Some((prefill, decode))
+}
+
+/// Pull `(draft_n, draft_n_accepted)` out of a completion response.
+///
+/// These are the only direct evidence that speculation is working: they are
+/// *not* exposed on the Prometheus `/metrics` endpoint the telemetry cockpit
+/// polls (that surface has no draft counters at all), so a per-response read
+/// is the only way to get them.
+///
+/// Checked under `timings` and at the top level. llama.cpp reports most
+/// per-request counters inside `timings`, but the draft pair is newer than
+/// that convention and the two spellings have moved between releases; looking
+/// in both costs nothing and avoids silently reporting a 0% accept rate —
+/// which would be indistinguishable from a draft that is genuinely useless.
+fn parse_draft_stats(body: &str) -> Option<(u64, u64)> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let pick = |obj: &serde_json::Value| -> Option<(u64, u64)> {
+        let n = obj.get("draft_n")?.as_u64()?;
+        let acc = obj.get("draft_n_accepted")?.as_u64()?;
+        Some((n, acc))
+    };
+    v.get("timings").and_then(pick).or_else(|| pick(&v))
 }
 
 /// One row of a cross-model benchmark report (frontend supplies the rows it
@@ -296,6 +417,110 @@ mod tests {
         assert_eq!(decode, 192.0);
     }
 
+    fn result(decode: f64, loaded: bool) -> BenchResult {
+        BenchResult {
+            n_gpu_layers: 99,
+            ctx_size: 4096,
+            loaded,
+            load_ms: 1000,
+            prefill_tok_s: 500.0,
+            decode_tok_s: decode,
+            peak_vram_bytes: 8_000_000_000,
+            speculative: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn reads_draft_stats_from_timings() {
+        let body = r#"{"content":"x","timings":{"predicted_n":96,"predicted_ms":500.0,
+                      "draft_n":120,"draft_n_accepted":78}}"#;
+        assert_eq!(parse_draft_stats(body), Some((120, 78)));
+    }
+
+    /// The counters have moved between llama.cpp releases, so the top level is
+    /// checked too. Reading neither would report a 0% accept rate, which is
+    /// indistinguishable from a genuinely useless draft.
+    #[test]
+    fn reads_draft_stats_from_the_top_level_too() {
+        let body = r#"{"draft_n":50,"draft_n_accepted":25,"timings":{"predicted_n":96}}"#;
+        assert_eq!(parse_draft_stats(body), Some((50, 25)));
+    }
+
+    #[test]
+    fn absent_draft_stats_are_none_not_zero() {
+        let body = r#"{"timings":{"predicted_n":96,"predicted_ms":500.0}}"#;
+        assert_eq!(parse_draft_stats(body), None);
+    }
+
+    #[test]
+    fn merge_reports_accept_rate_and_speedup() {
+        let baseline = result(40.0, true);
+        let mut spec = result(68.0, true);
+        spec.speculative = Some(SpecResult {
+            draft_n: 200,
+            draft_n_accepted: 150,
+            accept_rate: 0.0,
+            baseline_decode_tok_s: 0.0,
+            decode_tok_s: 68.0,
+            speedup: 0.0,
+        });
+        let merged = merge_speculative(baseline, spec);
+        let s = merged.speculative.expect("speculative result");
+        assert_eq!(s.accept_rate, 0.75);
+        assert_eq!(s.baseline_decode_tok_s, 40.0);
+        assert_eq!(s.speedup, 1.7);
+        // The headline numbers become the speculative ones, since that is the
+        // configuration being proposed.
+        assert_eq!(merged.decode_tok_s, 68.0);
+    }
+
+    /// A draft that makes things slower is a real outcome and must be visible,
+    /// not rounded away into "no difference".
+    #[test]
+    fn a_slower_draft_reports_a_speedup_below_one() {
+        let baseline = result(50.0, true);
+        let mut spec = result(35.0, true);
+        spec.speculative = Some(SpecResult {
+            draft_n: 200,
+            draft_n_accepted: 20,
+            accept_rate: 0.0,
+            baseline_decode_tok_s: 0.0,
+            decode_tok_s: 35.0,
+            speedup: 0.0,
+        });
+        let s = merge_speculative(baseline, spec).speculative.unwrap();
+        assert_eq!(s.accept_rate, 0.1);
+        assert!(s.speedup < 1.0, "got {}", s.speedup);
+    }
+
+    /// If the speculative half never loaded — a mismatched pair, or one that
+    /// did not fit — the baseline is kept and the error surfaced. Reporting a
+    /// bare baseline would read as "speculation changed nothing".
+    #[test]
+    fn a_failed_speculative_half_keeps_the_error() {
+        let baseline = result(40.0, true);
+        let mut failed = result(0.0, false);
+        failed.error = Some("draft model vocab must match target model".into());
+        let merged = merge_speculative(baseline, failed);
+        assert!(merged.speculative.is_none());
+        assert_eq!(merged.decode_tok_s, 40.0);
+        assert!(merged.error.unwrap().contains("vocab must match"));
+    }
+
+    #[test]
+    fn a_zero_baseline_does_not_produce_infinite_speedup() {
+        let baseline = result(0.0, true);
+        let mut spec = result(30.0, true);
+        spec.speculative = Some(SpecResult {
+            draft_n: 10, draft_n_accepted: 5, accept_rate: 0.0,
+            baseline_decode_tok_s: 0.0, decode_tok_s: 30.0, speedup: 0.0,
+        });
+        let s = merge_speculative(baseline, spec).speculative.unwrap();
+        assert_eq!(s.speedup, 0.0);
+        assert!(s.speedup.is_finite());
+    }
+
     #[test]
     fn timings_zero_ms_is_safe() {
         let body = r#"{"timings":{"prompt_n":5,"prompt_ms":0.0,"predicted_n":0,"predicted_ms":0.0}}"#;
@@ -322,8 +547,8 @@ mod tests {
             return;
         }
         let configs = vec![
-            BenchConfig { n_gpu_layers: 999, ctx_size: 4096 }, // full offload
-            BenchConfig { n_gpu_layers: 12, ctx_size: 4096 },  // partial (slower)
+            BenchConfig { n_gpu_layers: 999, ctx_size: 4096, ..Default::default() }, // full offload
+            BenchConfig { n_gpu_layers: 12, ctx_size: 4096, ..Default::default() },  // partial (slower)
         ];
         let results = run_benchmark(&model.to_string_lossy(), &configs, |r| {
             println!(
