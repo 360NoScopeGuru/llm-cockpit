@@ -1987,3 +1987,99 @@ select:focus {
   font: 11.5px var(--mono);
   color: var(--plasma);
 }
+
+/* ---- speculative draft picker (staged model, pre-ignition) ------------- */
+.draft-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+}
+.draft-pick.muted {
+  font: 10.5px var(--mono);
+  color: var(--faint);
+}
+.draft-head {
+  font: 10.5px var(--mono);
+  letter-spacing: 0.18em;
+  color: var(--faint);
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.draft-note {
+  letter-spacing: 0.02em;
+  color: var(--low);
+  opacity: 0.75;
+}
+.draft-opts {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.draft-opts button {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 9px;
+  font: 11px var(--mono);
+  line-height: 16px;
+  color: var(--low);
+  border-color: var(--hair);
+  border-radius: 3px;
+}
+.draft-opts button small {
+  font-size: 9.5px;
+  color: var(--faint);
+}
+.draft-opts button:disabled {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+.draft-opts button.on {
+  color: var(--plasma);
+  border-color: var(--plasma-deep);
+  background: var(--bg2);
+}
+.draft-opts button.on small {
+  color: var(--plasma-deep);
+}
+/* Economics is about cost and fit, never a promise of speed — so the only
+   colour cue is a warning on the bad trade. A green "recommended" badge would
+   read as "this will be faster", which is exactly the claim that measured
+   0.65x on the development machine. */
+.draft-opts button.counterproductive {
+  border-color: var(--warn, #7a4a2a);
+}
+.draft-opts button.counterproductive small {
+  color: var(--warn, #b5763f);
+}
+.draft-hint {
+  font: 10px var(--mono);
+  color: var(--faint);
+  letter-spacing: 0.02em;
+}
+.draft-rejected {
+  font: 10px var(--mono);
+  color: var(--faint);
+  text-align: left;
+  max-width: 420px;
+}
+.draft-rejected .linkish {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--faint);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+.draft-rejected ul {
+  margin: 4px 0 0;
+  padding-left: 14px;
+  line-height: 1.6;
+}

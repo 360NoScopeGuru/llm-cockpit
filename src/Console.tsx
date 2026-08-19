@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Markdown } from "./Markdown";
 import {
+  DraftCandidate,
   InferenceMetrics,
   SamplerSnap,
   ServerStatus,
@@ -105,6 +106,10 @@ export interface StagedIgnite {
   layers: number | null;
   ctx: number;
   busy: boolean;
+  /// Models that could draft for this one. `null` while loading.
+  drafts: DraftCandidate[] | null;
+  draftPath: string | null;
+  onPickDraft: (path: string | null) => void;
   onIgnite: () => void;
 }
 
@@ -1117,9 +1122,11 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
         <div className="console-state">
           <div className="state-box">
             <div className="state-sub mono">{p.staged.name} staged</div>
+            <DraftPicker staged={p.staged} />
             <button className="ignite-cta" disabled={p.staged.busy} onClick={p.staged.onIgnite}>
               IGNITE · {p.staged.ngl}
               {p.staged.layers ? `/${p.staged.layers}` : ""} LAYERS · {ctxLabel(p.staged.ctx)} CTX
+              {p.staged.draftPath ? " · +DRAFT" : ""}
             </button>
             <div className="state-hint">launches llama-server at the recommended config</div>
           </div>
@@ -1218,3 +1225,107 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     </div>
   );
 });
+
+/// Draft-model picker for speculative decoding, shown on the staged model
+/// just before ignition.
+///
+/// The verdicts here answer "does this fit, and what does it cost" — never
+/// "will this be faster". That distinction is load-bearing: on the development
+/// machine a pair this rates `recommended` (3.9% of the target's compute, zero
+/// layers evicted) still measured **0.65x** — slower — because acceptance was
+/// 44% and the target was already decoding at 63 tok/s. Whether speculation
+/// pays is a question only the benchmark answers, so the copy points there
+/// instead of implying a win.
+function DraftPicker({ staged }: { staged: StagedIgnite }) {
+  const [showRejected, setShowRejected] = useState(false);
+  const list = staged.drafts;
+
+  if (list === null) {
+    return <div className="draft-pick muted">checking for draft models…</div>;
+  }
+
+  const usable = list.filter((d) => d.verdict.kind !== "incompatible");
+  const rejected = list.filter((d) => d.verdict.kind === "incompatible");
+
+  // Nothing offerable: say so only if something was rejected, otherwise stay
+  // quiet rather than explaining an absence nobody asked about.
+  if (usable.length === 0) {
+    if (rejected.length === 0) return null;
+    return (
+      <div className="draft-pick muted">
+        no model here shares this one's tokenizer — {rejected.length} checked
+      </div>
+    );
+  }
+
+  const pct = (d: DraftCandidate) =>
+    d.cost_ratio == null ? "?" : `${(d.cost_ratio * 100).toFixed(1)}%`;
+
+  return (
+    <div className="draft-pick">
+      <div className="draft-head">
+        SPECULATIVE DRAFT
+        <span className="draft-note">runs ahead of the model; costs VRAM either way</span>
+      </div>
+      <div className="draft-opts">
+        <button
+          className={staged.draftPath === null ? "on" : ""}
+          onClick={() => staged.onPickDraft(null)}
+        >
+          NONE
+        </button>
+        {usable.slice(0, 4).map((d) => {
+          const pair = d.pair;
+          const evicted = pair?.target_layers_evicted ?? 0;
+          // A pair that costs target layers is a worse trade than not
+          // speculating at all: those layers run on the CPU for every token.
+          const blocked = pair?.verdict === "too_big";
+          const title = blocked
+            ? "does not fit alongside this model"
+            : evicted > 0
+              ? `fits, but pushes ${evicted} target layer(s) onto the CPU`
+              : `${pct(d)} of the target's compute per token, no layers displaced`;
+          return (
+            <button
+              key={d.path}
+              className={`${staged.draftPath === d.path ? "on" : ""} ${d.economics}`}
+              disabled={blocked}
+              title={title}
+              onClick={() => staged.onPickDraft(d.path)}
+            >
+              {d.label.replace(/\.gguf$/i, "")}
+              <small>
+                {pct(d)}
+                {evicted > 0 ? ` · −${evicted}L` : ""}
+              </small>
+            </button>
+          );
+        })}
+      </div>
+      {staged.draftPath && (
+        <div className="draft-hint">
+          benchmark it — a draft that fits can still be slower than none
+        </div>
+      )}
+      {rejected.length > 0 && (
+        <div className="draft-rejected">
+          <button className="linkish" onClick={() => setShowRejected((v) => !v)}>
+            {rejected.length} incompatible {showRejected ? "▾" : "▸"}
+          </button>
+          {showRejected && (
+            <ul>
+              {rejected.slice(0, 6).map((d) => (
+                <li key={d.path}>
+                  <span className="mono">{d.label.replace(/\.gguf$/i, "")}</span>
+                  {d.verdict.kind === "incompatible" && d.verdict.reasons[0]
+                    ? ` — ${d.verdict.reasons[0]}`
+                    : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}

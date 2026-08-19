@@ -22,6 +22,7 @@ import {
   ModelEntry,
   ScanRoot,
   ServerStatus,
+  DraftCandidate,
   SessionMeta,
   Settings,
   SuiteRow,
@@ -99,6 +100,11 @@ export default function App() {
   // the cache is the only VRAM term that scales with context length.
   const [kvType, setKvType] = useState<KvType>("f16");
   const [getOpen, setGetOpen] = useState(false);
+  // Speculative decoding: which local models could draft for the staged one,
+  // and which the user picked. Keyed by nothing — the list is refetched when
+  // the staged model changes, since candidacy is relative to the target.
+  const [drafts, setDrafts] = useState<DraftCandidate[] | null>(null);
+  const [draftPath, setDraftPath] = useState<string | null>(null);
   // Managed llama.cpp runtime: offered when no binary can be found, so nobody
   // has to install LM Studio just to get an inference backend.
   const [rtBuilds, setRtBuilds] = useState<RuntimeBuild[] | null>(null);
@@ -356,7 +362,7 @@ export default function App() {
     refreshSessions();
   }, []);
 
-  async function ignite(m: ModelEntry, ngl?: number, ctx?: number) {
+  async function ignite(m: ModelEntry, ngl?: number, ctx?: number, draft?: string | null) {
     setLaunching(true);
     setError(null);
     try {
@@ -379,6 +385,11 @@ export default function App() {
         // own default rather than being handed a redundant flag.
         cache_type_k: kvType === "f16" ? null : kvType,
         cache_type_v: kvType === "f16" ? null : kvType,
+        // Speculative decoding. The draft has to be fully offloaded: one
+        // running on the CPU is slower than the model it drafts for, which
+        // defeats the point.
+        draft_model_path: draft ?? null,
+        draft_n_gpu_layers: draft ? 999 : null,
       };
       const status = await invoke<ServerStatus>("llama_start", { config: cfg });
       setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size });
@@ -583,6 +594,34 @@ export default function App() {
   const busy = launching || benching;
   const runningPath = server?.running ? server.model_path : null;
   const selected = primary.find((m) => m.path === selectedPath) ?? null;
+
+  // Draft candidates for whatever is staged. Scoped to the staged model rather
+  // than fetched per selection because it walks the whole library: candidacy
+  // is relative to a target, so there is nothing to cache across models.
+  useEffect(() => {
+    const target = selected?.path;
+    if (!target || server?.running) {
+      setDrafts(null);
+      setDraftPath(null);
+      return;
+    }
+    let stale = false;
+    setDraftPath(null);
+    invoke<DraftCandidate[]>("draft_candidates", {
+      targetPath: target,
+      extraDirs: [],
+      ctxSize: estimates.get(target)?.ctx_size ?? null,
+    })
+      .then((list) => {
+        if (!stale) setDrafts(list);
+      })
+      .catch(() => {
+        if (!stale) setDrafts(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [selected?.path, server?.running, estimates]);
   const selectedEst = selected ? estimates.get(selected.path) ?? null : null;
   const runningModel = primary.find((m) => m.path === runningPath) ?? null;
   const liveEst = runningPath ? estimates.get(runningPath) ?? null : null;
@@ -623,7 +662,11 @@ export default function App() {
           layers: selected.metadata?.block_count ?? null,
           ctx: selectedEst.ctx_size,
           busy,
-          onIgnite: () => ignite(selected, selectedEst.n_gpu_layers, selectedEst.ctx_size),
+          drafts,
+          draftPath,
+          onPickDraft: setDraftPath,
+          onIgnite: () =>
+            ignite(selected, selectedEst.n_gpu_layers, selectedEst.ctx_size, draftPath),
         }
       : null;
 
