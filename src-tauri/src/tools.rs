@@ -249,15 +249,57 @@ mod tests {
         (root, s)
     }
 
+    /// The property under test is containment — the resolved path must stay
+    /// under the workspace root — not any particular spelling of an escape.
+    /// Forward slashes separate on both platforms, so these hold everywhere.
     #[test]
     fn sandbox_blocks_escapes() {
         let (_root, r) = mk_root();
+        assert!(read_file(&r, "../outside.txt").is_err());
+        assert!(read_file(&r, "sub/../../outside.txt").is_err());
+        assert!(write_file(&r, "../evil.txt", "x").is_err());
+        // Traversal that stays inside is legitimate and must still work.
+        assert!(read_file(&r, "sub/../a.txt").is_ok());
+    }
+
+    /// "Absolute" is spelled per platform: `Path::is_absolute` is false for
+    /// `C:\...` on Unix, so the Windows spelling would be quietly treated as a
+    /// relative filename there instead of testing anything.
+    #[test]
+    fn sandbox_blocks_absolute_paths_outside_the_root() {
+        let (_root, r) = mk_root();
+        #[cfg(windows)]
+        assert!(read_file(&r, "C:\\Windows\\win.ini").is_err());
+        #[cfg(not(windows))]
+        assert!(read_file(&r, "/etc/passwd").is_err());
+    }
+
+    /// Backslash is a path separator on Windows and an ordinary filename
+    /// character on Unix, so the same string is an escape attempt on one and a
+    /// harmless file name on the other. Both are safe, for different reasons,
+    /// and both are worth pinning — this is precisely the assumption that made
+    /// the suite fail the first time it ran on Linux.
+    #[test]
+    #[cfg(windows)]
+    fn backslash_traversal_is_an_escape_on_windows() {
+        let (_root, r) = mk_root();
         assert!(read_file(&r, "..\\outside.txt").is_err());
         assert!(read_file(&r, "sub\\..\\..\\outside.txt").is_err());
-        assert!(read_file(&r, "C:\\Windows\\win.ini").is_err());
         assert!(write_file(&r, "..\\evil.txt", "x").is_err());
-        // Legal traversal that stays inside is fine.
-        assert!(read_file(&r, "sub\\..\\a.txt").is_ok());
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn backslash_is_a_filename_not_a_traversal_on_unix() {
+        let (root, r) = mk_root();
+        let resolved = resolve(&r, "..\\evil.txt").expect("stays inside the workspace");
+        let canon_root = std::fs::canonicalize(&root).unwrap();
+        assert!(
+            resolved.starts_with(&canon_root),
+            "{} escaped {}",
+            resolved.display(),
+            canon_root.display()
+        );
     }
 
     #[test]
