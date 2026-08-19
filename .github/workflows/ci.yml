@@ -56,3 +56,43 @@ jobs:
       - name: Rust tests
         working-directory: src-tauri
         run: cargo test --locked
+
+  # Linux is a target we cannot test by hand, so the compiler is the evidence.
+  # This does not bundle an AppImage — it proves the Rust has no Windows-only
+  # assumptions left, which is the part most likely to rot silently while all
+  # development happens on Windows.
+  check-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: linux
+
+      # Tauri v2's Linux backend is WebKitGTK 4.1; the rest are what its
+      # bundler and the opener plugin link against.
+      - name: Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends             libwebkit2gtk-4.1-dev             libappindicator3-dev             librsvg2-dev             libxdo-dev             libssl-dev             patchelf
+
+      - run: npm ci
+
+      - name: Clippy (linux)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Rust tests (linux)
+        working-directory: src-tauri
+        run: cargo test --locked

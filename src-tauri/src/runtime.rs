@@ -131,6 +131,63 @@ fn cuda_version_key(name: &str) -> (u32, u32) {
     )
 }
 
+/// The platform/arch pair llama.cpp names its release assets for.
+///
+/// Carried as data rather than read from `cfg!` at each site so both branches
+/// are reachable from a test — the Linux selection has to be verifiable
+/// without a Linux machine to verify it on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Target {
+    /// "win" or "ubuntu" — upstream builds Linux artefacts on Ubuntu and
+    /// names them for it.
+    platform: &'static str,
+    /// "x64" or "arm64".
+    arch: &'static str,
+}
+
+impl Target {
+    fn current() -> Self {
+        Target {
+            platform: if cfg!(windows) { "win" } else { "ubuntu" },
+            arch: if cfg!(target_arch = "aarch64") {
+                "arm64"
+            } else {
+                "x64"
+            },
+        }
+    }
+
+    /// llama.cpp publishes no prebuilt CUDA build for Linux. That is not an
+    /// oversight to work around: NVIDIA users there take Vulkan from here, or
+    /// install their distribution's CUDA-enabled llama.cpp, which
+    /// `resolve_binaries` already finds on PATH.
+    fn cuda_available(&self) -> bool {
+        self.platform == "win"
+    }
+
+    fn vulkan_stem(&self) -> String {
+        format!("bin-{}-vulkan-{}", self.platform, self.arch)
+    }
+
+    /// The plain CPU build, named asymmetrically across platforms: Windows
+    /// publishes `…bin-win-cpu-x64.zip`, while the Linux CPU artefact carries
+    /// no backend token at all — just `…bin-ubuntu-x64.tar.gz`. Matching on
+    /// "cpu" therefore finds nothing on Linux.
+    ///
+    /// The bare stem is enough to exclude the accelerated builds, because each
+    /// carries its token *between* the platform and the arch
+    /// (`bin-ubuntu-vulkan-x64`, `bin-ubuntu-sycl-fp16-x64`), so none of them
+    /// contains `bin-ubuntu-x64`. Tests pin that, since it is the kind of
+    /// property that quietly stops holding when upstream renames something.
+    fn cpu_stem(&self) -> String {
+        if self.platform == "win" {
+            format!("bin-win-cpu-{}", self.arch)
+        } else {
+            format!("bin-{}-{}", self.platform, self.arch)
+        }
+    }
+}
+
 /// Which backends are worth offering, newest release, with real asset sizes.
 /// `has_nvidia` decides what gets recommended — CUDA is pointless without one.
 pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
@@ -166,16 +223,24 @@ pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
     let find = |pred: &dyn Fn(&str) -> bool| -> Option<(String, u64)> {
         assets.iter().find(|(n, _)| pred(n)).cloned()
     };
+    let target = Target::current();
     let mut out = Vec::new();
 
     // CUDA: the build plus its separately-shipped runtime DLLs. Several CUDA
     // majors are published at once; take the highest, which is both newer and
     // (currently) a smaller download than the older one.
+    // Windows only, and not an oversight upstream: llama.cpp publishes no
+    // prebuilt CUDA build for Linux. NVIDIA users there get Vulkan from here,
+    // or install their distribution's CUDA-enabled llama.cpp, which
+    // `resolve_binaries` already discovers on PATH.
     let cuda = assets
         .iter()
-        .filter(|(n, _)| n.contains("bin-win-cuda-") && n.contains("x64") && !n.starts_with("cudart"))
+        .filter(|(n, _)| {
+            n.contains("bin-win-cuda-") && n.contains(target.arch) && !n.starts_with("cudart")
+        })
         .max_by_key(|(n, _)| cuda_version_key(n))
-        .cloned();
+        .cloned()
+        .filter(|_| target.cuda_available());
     if let Some((cname, csize)) = cuda {
         // Match the cudart archive to the same CUDA version as the build.
         let ver = cname
@@ -201,7 +266,7 @@ pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
         });
     }
 
-    if let Some((n, s)) = find(&|n| n.contains("bin-win-vulkan") && n.contains("x64")) {
+    if let Some((n, s)) = find(&|n| n.contains(&target.vulkan_stem())) {
         out.push(RuntimeBuild {
             id: "vulkan".into(),
             label: "Vulkan".into(),
@@ -211,7 +276,7 @@ pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
             recommended: !has_nvidia,
         });
     }
-    if let Some((n, s)) = find(&|n| n.contains("bin-win-cpu") && n.contains("x64")) {
+    if let Some((n, s)) = find(&|n| n.contains(&target.cpu_stem())) {
         out.push(RuntimeBuild {
             id: "cpu".into(),
             label: "CPU only".into(),
@@ -222,7 +287,10 @@ pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
         });
     }
     if out.is_empty() {
-        return Err(format!("no usable Windows assets in llama.cpp {tag}"));
+        return Err(format!(
+            "no usable {} {} assets in llama.cpp {tag}",
+            target.platform, target.arch
+        ));
     }
     // Record which release these came from for the status line.
     if let Ok(d) = runtime_dir() {
@@ -421,5 +489,124 @@ mod live_install {
         // It need not rank first: an LM Studio CUDA build legitimately beats a
         // managed Vulkan one. It must beat a same-backend rival, though.
         assert!(managed.rank > 300, "managed should be preferred at equal backend");
+    }
+}
+
+#[cfg(test)]
+mod asset_selection {
+    use super::*;
+
+    /// Verbatim asset names from llama.cpp release b10423. Kept literal so a
+    /// rename upstream shows up as a test failure rather than as an empty
+    /// runtime list in front of a user.
+    const REAL: &[&str] = &[
+        "llama-b10423-bin-win-cuda-12.4-x64.zip",
+        "cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "llama-b10423-bin-win-vulkan-x64.zip",
+        "llama-b10423-bin-win-cpu-x64.zip",
+        "llama-b10423-bin-ubuntu-x64.tar.gz",
+        "llama-b10423-bin-ubuntu-vulkan-x64.tar.gz",
+        "llama-b10423-bin-ubuntu-arm64.tar.gz",
+        "llama-b10423-bin-ubuntu-vulkan-arm64.tar.gz",
+        "llama-b10423-bin-ubuntu-sycl-fp16-x64.tar.gz",
+        "llama-b10423-bin-ubuntu-sycl-fp32-x64.tar.gz",
+        "llama-b10423-bin-ubuntu-openvino-2026.2.1-x64.tar.gz",
+        "llama-b10423-bin-ubuntu-s390x.tar.gz",
+    ];
+
+    fn matching(stem: &str) -> Vec<&'static str> {
+        REAL.iter().copied().filter(|n| n.contains(stem)).collect()
+    }
+
+    const WIN: Target = Target { platform: "win", arch: "x64" };
+    const LINUX: Target = Target { platform: "ubuntu", arch: "x64" };
+    const LINUX_ARM: Target = Target { platform: "ubuntu", arch: "arm64" };
+
+    #[test]
+    fn windows_picks_its_own_three_backends() {
+        assert_eq!(matching(&WIN.cpu_stem()), ["llama-b10423-bin-win-cpu-x64.zip"]);
+        assert_eq!(matching(&WIN.vulkan_stem()), ["llama-b10423-bin-win-vulkan-x64.zip"]);
+        assert!(WIN.cuda_available());
+    }
+
+    /// The asymmetry this whole abstraction exists for: Linux's CPU build has
+    /// no "cpu" token, so the Windows predicate would find nothing at all.
+    #[test]
+    fn linux_cpu_build_carries_no_backend_token() {
+        assert_eq!(LINUX.cpu_stem(), "bin-ubuntu-x64");
+        assert_eq!(matching(&LINUX.cpu_stem()), ["llama-b10423-bin-ubuntu-x64.tar.gz"]);
+        // The old Windows-shaped predicate finds nothing here.
+        assert!(matching("bin-ubuntu-cpu").is_empty());
+    }
+
+    /// The bare stem must not sweep up the accelerated builds. It does not,
+    /// because each carries its token between platform and arch — but that is
+    /// a property of upstream naming, so it gets a test rather than a comment.
+    #[test]
+    fn the_linux_cpu_stem_excludes_accelerated_builds() {
+        let hits = matching(&LINUX.cpu_stem());
+        assert_eq!(hits.len(), 1, "cpu stem swept up extras: {hits:?}");
+        for acc in ["vulkan", "sycl", "openvino"] {
+            assert!(!hits[0].contains(acc), "{acc} leaked into the CPU build");
+        }
+    }
+
+    #[test]
+    fn linux_vulkan_is_offered_and_arch_specific() {
+        assert_eq!(
+            matching(&LINUX.vulkan_stem()),
+            ["llama-b10423-bin-ubuntu-vulkan-x64.tar.gz"]
+        );
+        assert_eq!(
+            matching(&LINUX_ARM.vulkan_stem()),
+            ["llama-b10423-bin-ubuntu-vulkan-arm64.tar.gz"]
+        );
+    }
+
+    #[test]
+    fn arm64_does_not_match_the_x64_builds() {
+        assert_eq!(matching(&LINUX_ARM.cpu_stem()), ["llama-b10423-bin-ubuntu-arm64.tar.gz"]);
+    }
+
+    /// Upstream ships no Linux CUDA artefact, so offering one would dangle a
+    /// build that cannot be downloaded.
+    #[test]
+    fn linux_is_not_offered_cuda() {
+        assert!(!LINUX.cuda_available());
+        assert!(
+            !REAL.iter().any(|n| n.contains("bin-ubuntu-cuda")),
+            "upstream started shipping Linux CUDA — revisit cuda_available()"
+        );
+    }
+
+    /// The pinned names above are a snapshot; this checks the same stems
+    /// against whatever llama.cpp published most recently. Ignored by default
+    /// (network); run with:
+    ///   cargo test -- --ignored --nocapture stems_match_the_live_release
+    #[test]
+    #[ignore]
+    fn stems_match_the_live_release() {
+        let body = agent()
+            .get(RELEASES)
+            .set("User-Agent", "tokamak")
+            .call()
+            .expect("reach github")
+            .into_string()
+            .expect("body");
+        let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+        let names: Vec<String> = v["assets"]
+            .as_array()
+            .expect("assets")
+            .iter()
+            .filter_map(|a| a["name"].as_str().map(str::to_string))
+            .collect();
+        println!("release {}", v["tag_name"].as_str().unwrap_or("?"));
+        for t in [WIN, LINUX] {
+            for (what, stem) in [("cpu", t.cpu_stem()), ("vulkan", t.vulkan_stem())] {
+                let hits: Vec<&String> = names.iter().filter(|n| n.contains(&stem)).collect();
+                println!("  {:6} {:8} {stem:24} -> {hits:?}", t.platform, what);
+                assert_eq!(hits.len(), 1, "{} {what} stem {stem} matched {hits:?}", t.platform);
+            }
+        }
     }
 }
