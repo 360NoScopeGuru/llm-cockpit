@@ -241,7 +241,18 @@ mod tests {
     // Sandboxing is the security boundary — test it without extra dev-deps by
     // using a folder created under the OS temp dir.
     fn mk_root() -> (PathBuf, String) {
-        let root = std::env::temp_dir().join(format!("tokamak-tools-test-{}", std::process::id()));
+        // One directory per call, not per process. Every test in a binary
+        // shares a pid and cargo runs them on parallel threads, so keying on
+        // the pid alone had them all writing and reading the same fixture:
+        // one test's `write(a.txt, "hello")` raced another's read of it, which
+        // surfaced on Linux as an empty string where "hello" was expected.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let root = std::env::temp_dir()
+            .join(format!("tokamak-tools-test-{}-{n}", std::process::id()));
+        // A leftover from an earlier run would make assertions depend on
+        // history rather than on the fixture.
+        let _ = fs::remove_dir_all(&root);
         let _ = fs::create_dir_all(root.join("sub"));
         fs::write(root.join("a.txt"), "hello").unwrap();
         fs::write(root.join("sub").join("b.txt"), "world").unwrap();
