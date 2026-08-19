@@ -291,8 +291,13 @@ pub fn rank_drafts(
         .iter()
         .filter(|m| {
             // A model cannot draft for itself, and neither shard tails nor
-            // vision projectors are loadable as a standalone draft.
-            m.path != target_path && !m.is_shard_continuation && !m.is_mmproj
+            // vision projectors are loadable as a standalone draft. Nor is
+            // anything the runtime will refuse outright — offering a draft
+            // that cannot load only moves the failure to launch time.
+            m.path != target_path
+                && !m.is_shard_continuation
+                && !m.is_mmproj
+                && m.load_blocker.is_none()
         })
         .filter_map(|m| {
             let meta = m.metadata.as_ref()?;
@@ -411,6 +416,7 @@ mod tests {
             split_no: None,
             expert_count: None,
             expert_used_count: None,
+            has_norm_epsilon: true,
             vocab_type: Some(vocab_type.into()),
             vocab_size: Some(vocab_size),
             bos_token_id: Some(151643),
@@ -521,6 +527,7 @@ mod tests {
             is_mmproj: false,
             metadata: meta,
             parse_error: None,
+            load_blocker: None,
         }
     }
 
@@ -718,6 +725,20 @@ mod tests {
         let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].path, "ok.gguf");
+    }
+
+    /// A model stock llama.cpp refuses to load is not a draft candidate,
+    /// however compatible its tokenizer looks. Ollama's gemma3 blobs are
+    /// exactly this: genuinely compatible with each other, and unloadable.
+    #[test]
+    fn models_the_runtime_rejects_are_not_offered() {
+        let target = dense(14_000_000_000);
+        let mut blocked = entry("unloadable.gguf", 500, Some(dense(600_000_000)));
+        blocked.load_blocker = Some("missing gemma3.attention.layer_norm_rms_epsilon".into());
+        let models = vec![blocked, entry("fine.gguf", 500, Some(dense(600_000_000)))];
+        let ranked = rank_drafts("target.gguf", &target, 30_000, &models, None);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].path, "fine.gguf");
     }
 
     #[test]

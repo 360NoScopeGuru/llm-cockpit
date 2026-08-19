@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use walkdir::WalkDir;
 
-use crate::gguf::{read_gguf_metadata, GgufMetadata};
+use crate::gguf::{load_blocker, read_gguf_metadata, GgufMetadata};
 
 /// A directory the scanner looks in, with a human label for its origin.
 #[derive(Debug, Clone, Serialize)]
@@ -43,6 +43,10 @@ pub struct ModelEntry {
     pub is_mmproj: bool,
     pub metadata: Option<GgufMetadata>,
     pub parse_error: Option<String>,
+    /// Set when the header parsed fine but stock llama.cpp will refuse to load
+    /// the file anyway. Distinct from `parse_error`: this model is readable,
+    /// just not runnable. See `gguf::load_blocker`.
+    pub load_blocker: Option<String>,
 }
 
 /// Build the default set of roots to scan, honoring `HF_HOME` if set.
@@ -199,6 +203,13 @@ fn build_entry(path: &Path, source: &str) -> ModelEntry {
         display_name: None,
         is_shard_continuation: shard.map(|(i, _)| i > 1).unwrap_or(false),
         shard_total: shard.map(|(_, t)| t),
+        // A projector is never launched on its own, so llama.cpp's model
+        // requirements do not apply to it — flagging one would be noise.
+        load_blocker: if is_mmproj {
+            None
+        } else {
+            metadata.as_ref().and_then(load_blocker)
+        },
         is_mmproj,
         metadata,
         parse_error,
@@ -269,6 +280,7 @@ mod tests {
                 e.parse_error
                     .as_ref()
                     .map(|s| format!(" ERR: {s}"))
+                    .or_else(|| e.load_blocker.as_ref().map(|_| " *** WILL NOT LOAD".into()))
                     .unwrap_or_default(),
             );
         }

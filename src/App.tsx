@@ -127,7 +127,8 @@ export default function App() {
       setModels(modelList);
       // Prime fit estimates for every primary model (cheap: header + NVML).
       for (const m of modelList) {
-        if (m.is_shard_continuation || m.is_mmproj || m.parse_error) continue;
+        if (m.is_shard_continuation || m.is_mmproj || m.parse_error || m.load_blocker)
+          continue;
         if (estimatesRef.current.has(m.path)) continue;
         invoke<VramEstimate>("estimate_config", { modelPath: m.path })
           .then((est) => setEstimates((prev) => new Map(prev).set(m.path, est)))
@@ -457,7 +458,7 @@ export default function App() {
   // ---- benchmark suite (all models, recommended config each) ----
 
   async function runSuite() {
-    const eligible = primary.filter((m) => !m.parse_error);
+    const eligible = primary.filter((m) => !m.parse_error && !m.load_blocker);
     if (eligible.length === 0) return;
     setBenching(true);
     setBench(null);
@@ -655,7 +656,12 @@ export default function App() {
       : null;
 
   const staged: StagedIgnite | null =
-    !server?.running && !benching && selected && selectedEst && selectedEst.fits
+    !server?.running &&
+    !benching &&
+    selected &&
+    !selected.load_blocker &&
+    selectedEst &&
+    selectedEst.fits
       ? {
           name: modelLabel(selected),
           ngl: selectedEst.n_gpu_layers,

@@ -31,6 +31,9 @@ export interface ModelEntry {
   is_mmproj: boolean;
   metadata: GgufMetadata | null;
   parse_error: string | null;
+  /// Set when the header parsed but stock llama.cpp will refuse to load the
+  /// file. Readable, not runnable — distinct from `parse_error`.
+  load_blocker: string | null;
 }
 
 export interface ScanRoot {

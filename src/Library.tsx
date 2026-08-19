@@ -132,7 +132,7 @@ export function Library(p: LibraryProps) {
                       e.stopPropagation();
                       p.onIgnite(m);
                     }}
-                    disabled={p.busy || !!m.parse_error || live}
+                    disabled={p.busy || !!m.parse_error || !!m.load_blocker || live}
                   >
                     {live ? "Live" : "Ignite"}
                   </button>
@@ -141,7 +141,7 @@ export function Library(p: LibraryProps) {
                       e.stopPropagation();
                       p.onBench(m);
                     }}
-                    disabled={p.busy || !!m.parse_error}
+                    disabled={p.busy || !!m.parse_error || !!m.load_blocker}
                   >
                     Bench
                   </button>
@@ -155,6 +155,11 @@ export function Library(p: LibraryProps) {
                 </span>
               )}
               {m.parse_error && <span className="fuel-hint">parse error: {m.parse_error}</span>}
+              {!m.parse_error && m.load_blocker && (
+                <span className="fuel-hint" title={m.load_blocker}>
+                  will not load — {m.load_blocker}
+                </span>
+              )}
             </div>
           );
         })}
