@@ -403,6 +403,18 @@ fn build_args(cfg: &LlamaServerConfig) -> Vec<String> {
     // fallback spelling here — a binary old enough to need one would fail
     // loudly rather than silently ignoring the draft.
     if let Some(draft) = &cfg.draft_model_path {
+        // REQUIRED, and easy to miss: --spec-type defaults to `none`. Passing a
+        // draft model without it loads the draft, spends its VRAM (~1 GiB for a
+        // 0.6B Q8_0) and then never speculates — the slot reports
+        // `"speculative": false` and no draft counters come back at all. Only a
+        // verbose log says why:
+        //     spec common_specu: no implementations specified
+        // `draft-simple` is the implementation that uses a draft model.
+        // llama.cpp also offers draft-free n-gram types (ngram-simple,
+        // ngram-cache, ...) which need no second model; those are a separate
+        // feature, not a substitute here.
+        args.push("--spec-type".into());
+        args.push("draft-simple".into());
         args.push("--spec-draft-model".into());
         args.push(draft.clone());
         if let Some(n) = cfg.draft_n_max {
@@ -699,6 +711,11 @@ mod tests {
             ..Default::default()
         };
         let args = build_args(&cfg);
+        // Without this the draft loads, costs VRAM, and never speculates:
+        // --spec-type defaults to `none`. Measured on a real pair — omitting
+        // it produced `"speculative": false` and zero draft counters, while
+        // adding it produced 58.8% acceptance and a 1.22x decode speedup.
+        assert_eq!(val_after(&args, "--spec-type"), Some("draft-simple"));
         assert_eq!(val_after(&args, "--spec-draft-model"), Some("draft.gguf"));
         assert_eq!(val_after(&args, "--spec-draft-n-max"), Some("5"));
         assert_eq!(val_after(&args, "--spec-draft-n-min"), Some("1"));
@@ -726,6 +743,7 @@ mod tests {
         };
         let args = build_args(&cfg);
         assert!(!args.iter().any(|a| a.starts_with("--spec-draft")));
+        assert!(!args.iter().any(|a| a == "--spec-type"));
     }
 
     #[test]

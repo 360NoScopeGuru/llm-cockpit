@@ -283,8 +283,16 @@ fn post_completion(port: u16) -> Option<String> {
     let url = format!("http://127.0.0.1:{port}/completion");
     // ignore_eos forces exactly N_PREDICT tokens so the decode rate is measured
     // over a real, fixed workload instead of a near-instant early stop.
+    //
+    // temperature 0 is greedy, and that is deliberate. A benchmark has to be
+    // reproducible, and with the server's default sampling the draft
+    // acceptance rate is not: the same pair and settings measured 35% and 59%
+    // on consecutive runs, because acceptance depends on which tokens were
+    // actually sampled. Greedy pins it. It also measures the draft's ceiling —
+    // real generation at a higher temperature will accept less, so treat the
+    // reported rate as the best case rather than a promise.
     let body = format!(
-        r#"{{"prompt":"{BENCH_PROMPT}","n_predict":{N_PREDICT},"ignore_eos":true,"stream":false}}"#
+        r#"{{"prompt":"{BENCH_PROMPT}","n_predict":{N_PREDICT},"ignore_eos":true,"temperature":0,"stream":false}}"#
     );
     // Generous: a config spilled to CPU can take minutes for 96 tokens, and a
     // slow measured number beats a false "generation failed".
@@ -519,6 +527,60 @@ mod tests {
         let s = merge_speculative(baseline, spec).speculative.unwrap();
         assert_eq!(s.speedup, 0.0);
         assert!(s.speedup.is_finite());
+    }
+
+    /// The real A/B on this machine's hardware. Ignored (machine-dependent);
+    /// run with:
+    ///   cargo test -- --ignored --nocapture spec_real_pair
+    ///
+    /// Needs a tokenizer-compatible pair resident on one GPU. On the dev box
+    /// that is Ollama's qwen3:14b with Qwen3-0.6B-Q8_0 as the draft.
+    #[test]
+    #[ignore]
+    fn spec_real_pair() {
+        let models = crate::scanner::scan_models(&[]);
+        let find = |needle: &str| {
+            models
+                .iter()
+                .find(|m| {
+                    m.display_name.as_deref().unwrap_or(&m.file_name)
+                        .to_lowercase()
+                        .contains(needle)
+                })
+                .map(|m| m.path.clone())
+        };
+        let (Some(target), Some(draft)) = (find("qwen3:14b"), find("qwen3-0.6b")) else {
+            eprintln!("target/draft pair not present, skipping");
+            return;
+        };
+        println!("target: {target}
+draft:  {draft}");
+
+        let configs = vec![BenchConfig {
+            n_gpu_layers: 999,
+            ctx_size: 4096,
+            draft_model_path: Some(draft),
+            // Left at llama.cpp's default of 3 on purpose: at 5 the acceptance
+            // rate measured markedly worse on this pair.
+            draft_n_max: None,
+        }];
+        let results = run_benchmark(&target, &configs, |_| {});
+        let r = results.first().expect("one result");
+        assert!(r.loaded, "benchmark failed: {:?}", r.error);
+        let s = r.speculative.as_ref().expect(
+            "no speculative result -- llama-server reported no draft counters",
+        );
+        println!(
+            "  drafted {} accepted {} -> accept rate {:.1}%",
+            s.draft_n, s.draft_n_accepted, s.accept_rate * 100.0
+        );
+        println!(
+            "  decode {:.2} tok/s vs baseline {:.2} tok/s -> {:.2}x",
+            s.decode_tok_s, s.baseline_decode_tok_s, s.speedup
+        );
+        assert!(s.draft_n > 0, "draft counters must be non-zero when speculating");
+        assert!(s.accept_rate > 0.0 && s.accept_rate <= 1.0);
+        assert!(s.baseline_decode_tok_s > 0.0);
     }
 
     #[test]
