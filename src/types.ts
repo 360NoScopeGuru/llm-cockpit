@@ -140,6 +140,18 @@ export interface SuiteRow {
   skipped: string | null;
 }
 
+/// What speculative decoding actually bought, measured by running the same
+/// config twice. `speedup` below 1.0 means the draft made generation slower,
+/// which is a common and reportable outcome.
+export interface SpecResult {
+  draft_n: number;
+  draft_n_accepted: number;
+  accept_rate: number;
+  baseline_decode_tok_s: number;
+  decode_tok_s: number;
+  speedup: number;
+}
+
 export interface BenchResult {
   n_gpu_layers: number;
   ctx_size: number;
@@ -148,6 +160,7 @@ export interface BenchResult {
   prefill_tok_s: number;
   decode_tok_s: number;
   peak_vram_bytes: number;
+  speculative: SpecResult | null;
   error: string | null;
 }
 
@@ -256,4 +269,49 @@ export function modelLabel(m: ModelEntry): string {
   // `ollama list` says; the GGUF's internal name would not.
   if (m.display_name) return m.display_name;
   return (m.metadata?.name ?? m.file_name).replace(/\.gguf$/i, "");
+}
+
+/// Why a model can or cannot draft for a target. Mirrors `DraftVerdict` in
+/// speculative.rs: `unverifiable` means the metadata does not say, which is
+/// deliberately distinct from "this works".
+export type DraftVerdict =
+  | { kind: "compatible" }
+  | { kind: "incompatible"; reasons: string[] }
+  | { kind: "unverifiable"; reasons: string[] };
+
+/// Whether the draft is cheap enough relative to the target to be worth
+/// running. This is about *fit and cost*, never a promise of speedup — only a
+/// benchmark can tell you that, and it frequently says no.
+export type DraftEconomics = "recommended" | "marginal" | "counterproductive" | "unknown";
+
+export type PairVerdict = "fits" | "costs_target_layers" | "too_big";
+
+export interface PairEstimate {
+  verdict: PairVerdict;
+  ctx_size: number;
+  target_layers_on_gpu: number;
+  target_layers_total: number;
+  /// Target layers pushed off the GPU to make room. The real price.
+  target_layers_evicted: number;
+  draft_layers_on_gpu: number;
+  draft_layers_total: number;
+  est_target_bytes: number;
+  est_draft_bytes: number;
+  est_total_bytes: number;
+  budget_bytes: number;
+  notes: string[];
+}
+
+export interface DraftCandidate {
+  path: string;
+  label: string;
+  size_bytes: number;
+  parameter_count: number | null;
+  quant_label: string | null;
+  verdict: DraftVerdict;
+  active_params: number | null;
+  /// Draft cost as a fraction of the target's, by active parameters.
+  cost_ratio: number | null;
+  economics: DraftEconomics;
+  pair: PairEstimate | null;
 }
