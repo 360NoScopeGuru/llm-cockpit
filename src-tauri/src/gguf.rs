@@ -129,6 +129,12 @@ pub struct GgufMetadata {
     /// judging whether one model can usefully draft for another.
     pub expert_count: Option<u64>,
     pub expert_used_count: Option<u64>,
+    /// Whether the architecture's normalisation epsilon is present, under
+    /// either spelling (`…attention.layer_norm_rms_epsilon` for RMS-norm
+    /// architectures, `…attention.layer_norm_epsilon` for LayerNorm ones).
+    /// llama.cpp treats it as required and refuses to load without it — see
+    /// `load_blocker`.
+    pub has_norm_epsilon: bool,
     /// For sharded models: total shard count and this file's 1-based index.
     pub split_count: Option<u64>,
     pub split_no: Option<u64>,
@@ -355,6 +361,17 @@ pub fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata, GgufErro
         parameter_count: kv.get("general.parameter_count").and_then(|v| v.as_u64()),
         expert_count: arch_key("expert_count"),
         expert_used_count: arch_key("expert_used_count"),
+        // Exact keys, not a prefix scan: a multimodal model carries
+        // `<arch>.vision.attention.layer_norm_epsilon` for its vision tower,
+        // and matching that would mask a missing *text* epsilon — which is
+        // precisely the case this exists to catch.
+        has_norm_epsilon: architecture
+            .as_deref()
+            .map(|a| {
+                kv.contains_key(&format!("{a}.attention.layer_norm_rms_epsilon"))
+                    || kv.contains_key(&format!("{a}.attention.layer_norm_epsilon"))
+            })
+            .unwrap_or(false),
         size_label: kv
             .get("general.size_label")
             .and_then(|v| v.as_string())
@@ -378,6 +395,38 @@ pub fn read_metadata<R: Read + Seek>(reader: R) -> Result<GgufMetadata, GgufErro
             .and_then(|v| v.as_bool()),
         architecture,
     })
+}
+
+/// Why stock `llama.cpp` will refuse to load this file, if it will.
+///
+/// The library lists every GGUF it finds, which is right — but listing a model
+/// that dies on launch with a message the user never sees is not. This catches
+/// the case cheaply, from the header alone.
+///
+/// Today there is one rule, and it is empirical rather than guessed. Every
+/// loadable model on the development machine carries its architecture's
+/// normalisation epsilon:
+///
+/// | model | key |
+/// |---|---|
+/// | qwen3, deepseek2, mistral3 | `<arch>.attention.layer_norm_rms_epsilon` |
+/// | nomic-bert | `<arch>.attention.layer_norm_epsilon` |
+///
+/// Ollama's `gemma3` blobs carry neither — only `gemma3.vision.attention.
+/// layer_norm_epsilon`, for the vision tower — and llama.cpp exits with
+/// `key not found in model: gemma3.attention.layer_norm_rms_epsilon`. Ollama
+/// runs them because its own engine supplies a default; nothing else can.
+///
+/// Deliberately conservative: it reports only what has been observed to fail,
+/// so a `None` here is not a promise that the model loads.
+pub fn load_blocker(md: &GgufMetadata) -> Option<String> {
+    if md.architecture.is_some() && !md.has_norm_epsilon {
+        let arch = md.architecture.as_deref().unwrap_or("this architecture");
+        return Some(format!(
+            "missing {arch}.attention.layer_norm_rms_epsilon — llama.cpp cannot load              this file. Ollama-converted {arch} models rely on Ollama's own engine              for the default; re-download a standard GGUF to use it here."
+        ));
+    }
+    None
 }
 
 /// Map `general.file_type` (llama.cpp LLAMA_FTYPE enum) to a human quant label.
@@ -443,6 +492,11 @@ mod tests {
     }
     /// A string-array KV (like the tokenizer vocab) that the parser must skip
     /// over without materializing, while still reading keys that follow it.
+    fn kv_f32(buf: &mut Vec<u8>, key: &str, v: f32) {
+        push_str(buf, key);
+        buf.extend(vtype::F32.to_le_bytes());
+        buf.extend(v.to_le_bytes());
+    }
     fn kv_str_array(buf: &mut Vec<u8>, key: &str, vals: &[&str]) {
         push_str(buf, key);
         buf.extend(vtype::ARRAY.to_le_bytes());
@@ -483,6 +537,57 @@ mod tests {
         assert_eq!(md.quant_label.as_deref(), Some("Q4_K_M"));
         assert_eq!(md.context_length, Some(4096));
         assert_eq!(md.block_count, Some(32));
+    }
+
+    /// Grounded in real files, not invented: every model that loads on the
+    /// development machine carries one of the two epsilon spellings, and
+    /// Ollama's gemma3 blobs carry neither.
+    #[test]
+    fn rms_epsilon_satisfies_the_norm_requirement() {
+        let mut body = Vec::new();
+        kv_str(&mut body, "general.architecture", "qwen3");
+        kv_f32(&mut body, "qwen3.attention.layer_norm_rms_epsilon", 1e-6);
+        let md = read_metadata(Cursor::new(build_gguf(2, body))).expect("parses");
+        assert!(md.has_norm_epsilon);
+        assert!(load_blocker(&md).is_none());
+    }
+
+    /// LayerNorm architectures spell it without `rms`; both count.
+    #[test]
+    fn plain_epsilon_also_satisfies_it() {
+        let mut body = Vec::new();
+        kv_str(&mut body, "general.architecture", "nomic-bert");
+        kv_f32(&mut body, "nomic-bert.attention.layer_norm_epsilon", 1e-12);
+        let md = read_metadata(Cursor::new(build_gguf(2, body))).expect("parses");
+        assert!(md.has_norm_epsilon);
+        assert!(load_blocker(&md).is_none());
+    }
+
+    /// The real failure: Ollama's gemma3 carries the epsilon for its *vision*
+    /// tower and nothing for the text model, and llama.cpp exits with
+    /// "key not found in model: gemma3.attention.layer_norm_rms_epsilon".
+    /// A prefix scan would be fooled by the vision key, so the check must
+    /// match exact names.
+    #[test]
+    fn a_vision_epsilon_does_not_count_for_the_text_model() {
+        let mut body = Vec::new();
+        kv_str(&mut body, "general.architecture", "gemma3");
+        kv_f32(&mut body, "gemma3.vision.attention.layer_norm_epsilon", 1e-6);
+        kv_u32(&mut body, "gemma3.block_count", 48);
+        let md = read_metadata(Cursor::new(build_gguf(3, body))).expect("parses");
+        assert!(!md.has_norm_epsilon);
+        let why = load_blocker(&md).expect("should be blocked");
+        assert!(why.contains("gemma3.attention.layer_norm_rms_epsilon"), "{why}");
+    }
+
+    /// Without an architecture there is nothing to check against, and
+    /// guessing would be worse than staying quiet.
+    #[test]
+    fn no_architecture_yields_no_blocker() {
+        let mut body = Vec::new();
+        kv_u32(&mut body, "general.file_type", 15);
+        let md = read_metadata(Cursor::new(build_gguf(1, body))).expect("parses");
+        assert!(load_blocker(&md).is_none());
     }
 
     #[test]
