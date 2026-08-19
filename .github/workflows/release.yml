@@ -1,13 +1,17 @@
 name: Release
 
-# Builds a Windows installer and attaches it to a GitHub Release.
+# Builds installers for every supported platform and attaches them to one
+# GitHub Release.
 #
 # This exists so that using Tokamak does not require a toolchain. Installing
 # Rust, Node and the Tauri prerequisites is fine for developing it, but it is a
-# ridiculous ask for someone who just wants to run the app — they get an .msi.
+# ridiculous ask for someone who just wants to run the app.
 #
-# Trigger: push a version tag (`git tag v0.1.0 && git push origin v0.1.0`),
-# or run it by hand from the Actions tab.
+# Trigger: push a version tag (`git tag v0.1.0 && git push origin v0.1.0`) to
+# build *and* publish a draft release, or run it by hand from the Actions tab
+# to build the installers and keep them as workflow artefacts without touching
+# releases. The second mode exists so the packaging can be proven before a tag
+# commits it to something public.
 
 on:
   push:
@@ -19,7 +23,24 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    strategy:
+      # One platform failing must not bin the artefacts the other already
+      # produced — a Windows-only release is worth more than no release.
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: windows
+            # Tauri's Windows default is msi + nsis; both are wanted.
+            bundles: ""
+          - os: ubuntu-22.04
+            label: linux
+            # 22.04 rather than 24.04 on purpose: glibc and webkit2gtk are
+            # forward-compatible, not backward. A .deb built on 24.04 refuses
+            # to install on 22.04, so building on the older image is what makes
+            # the artefacts usable on both.
+            bundles: "--bundles appimage,deb,rpm"
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -35,10 +56,27 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          key: ${{ matrix.label }}
+
+      # Tauri v2's Linux backend is WebKitGTK 4.1; the rest are what its
+      # bundler and the opener plugin link against. patchelf and the fuse
+      # libraries are specifically for building the AppImage.
+      - name: Tauri system dependencies
+        if: matrix.label == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libfuse2 \
+            patchelf
 
       - run: npm ci
 
-      # Fail the release before building the installer, not after.
+      # Fail the release before building installers, not after.
       - name: Typecheck and build frontend
         run: npm run build
 
@@ -46,18 +84,44 @@ jobs:
         working-directory: src-tauri
         run: cargo test --locked
 
-      - name: Build installer
+      - name: Build installers
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
+          args: ${{ matrix.bundles }}
+          # Empty on a manual run: tauri-action publishes only when given a
+          # tag, so a dispatch builds the same installers and releases nothing.
+          tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: Tokamak ${{ github.ref_name }}
           releaseBody: |
-            Windows installer. No toolchain required — download the `.msi`, run it, done.
+            No toolchain required — download, run, done.
 
-            Needs an NVIDIA GPU (telemetry and benchmarking use NVML) and a
-            `llama-server` binary; if LM Studio is installed Tokamak finds its
-            bundled builds automatically.
+            **Windows** — `.msi` or `.exe`. Needs an NVIDIA GPU for telemetry
+            and benchmarking (NVML), and a `llama-server` binary; Tokamak can
+            fetch one for you, and finds LM Studio's automatically if it is
+            installed.
+
+            **Linux** — `.AppImage` (works anywhere; `chmod +x` and run),
+            `.deb`, or `.rpm`. Built on Ubuntu 22.04, so it installs on 22.04
+            and newer. One caveat worth stating plainly: llama.cpp publishes no
+            prebuilt CUDA build for Linux, so the runtime Tokamak fetches there
+            is Vulkan or CPU. NVIDIA users who want CUDA should install their
+            distribution's CUDA-enabled `llama.cpp` — Tokamak finds it on PATH.
           releaseDraft: true
           prerelease: false
+
+      # Manual runs keep the installers here instead, so the packaging can be
+      # downloaded and checked before any tag exists.
+      - name: Upload installers as artefacts
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.AppImage
+            src-tauri/target/release/bundle/**/*.deb
+            src-tauri/target/release/bundle/**/*.rpm
