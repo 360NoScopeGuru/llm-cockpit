@@ -7,39 +7,58 @@ Know what fits on your GPU before you download it.
 [![Release](https://img.shields.io/github/v/release/360NoScopeGuru/tokamak?style=flat-square&color=eda03f&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/releases/latest)
 [![Build](https://img.shields.io/github/actions/workflow/status/360NoScopeGuru/tokamak/release.yml?style=flat-square&color=86b95e&labelColor=1a1614)](https://github.com/360NoScopeGuru/tokamak/actions)
 [![License](https://img.shields.io/badge/license-MPL--2.0-b8ac9d?style=flat-square&labelColor=1a1614)](LICENSE)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%2B%20NVIDIA-948878?style=flat-square&labelColor=1a1614)](#install)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%2B%20Linux-948878?style=flat-square&labelColor=1a1614)](#install)
 
 ![Tokamak running a model](docs/img/cockpit.png)
 
-Tokamak is a Windows desktop app for people who run large language models on their own hardware and want to actually see and control what is happening. It finds the GGUF models you already have, works out the best way to run each one on your GPU, launches them through llama.cpp, and turns the whole thing into a live instrument panel: VRAM, utilization, temperature, power, tokens per second, and KV cache pressure, all animated in real time.
+Tokamak is a desktop app for people who run large language models on their own hardware and want to actually see and control what is happening. It finds the GGUF models you already have, works out the best way to run each one on your GPU, launches them through llama.cpp, and turns the whole thing into a live instrument panel: VRAM, utilization, temperature, power, tokens per second, and KV cache pressure, all animated in real time.
 
 A tokamak is the machine that holds a fusion reaction inside a magnetic ring. That is roughly the job here: contain a model that wants all of your VRAM, keep it stable, and get useful work out of it. The name also happens to start with "tok", which is the only unit anyone here cares about.
 
-> Status: v0.1.2, Windows + NVIDIA first. Built with Tauri 2 (Rust) and React.
+> Status: v0.1.3. Windows and Linux, NVIDIA first. Built with Tauri 2 (Rust) and React.
 
 ---
 
 ## Install
 
-**[⬇ Download the latest installer](https://github.com/360NoScopeGuru/tokamak/releases/latest)** — run the `.msi`, done.
+**[⬇ Download the latest installer](https://github.com/360NoScopeGuru/tokamak/releases/latest)** — no Rust, no Node, no toolchain. Installers are built by CI on every tagged version.
 
-No Rust, no Node, no toolchain. Installers are built by CI on every tagged version.
+| | |
+|---|---|
+| **Windows** | Run the `.msi`, or the `.exe` setup. Windows will warn that the publisher is unknown, because the build is unsigned: choose **More info → Run anyway** |
+| **Linux** | `.AppImage` — `chmod +x Tokamak_*.AppImage` and run it, nothing to install. Or `.deb` (`sudo apt install ./Tokamak_*.deb`) or `.rpm` (`sudo dnf install ./Tokamak-*.rpm`). Built on Ubuntu 22.04, so it wants 22.04 or an equivalently recent distribution |
 
-Windows will warn that the publisher is unknown, because the build is unsigned:
-choose **More info → Run anyway**.
+The AppImage is roughly fifteen times the size of the `.deb`/`.rpm` because it
+carries its own WebKitGTK runtime; the distribution packages link against the
+one you already have.
 
 ### What you also need
 
 | | |
 |---|---|
-| **GPU** | NVIDIA — telemetry and benchmarking use NVML |
-| **Inference runtime** | None. On first run Tokamak offers to fetch the right llama.cpp build for your GPU (CUDA, Vulkan or CPU) and manages it itself. If you already have LM Studio or llama.cpp, it uses those instead |
+| **GPU** | NVIDIA, for telemetry and benchmarking — both read NVML |
+| **Inference runtime** | None. On first run Tokamak offers to fetch the right llama.cpp build for your GPU and manages it itself. If you already have LM Studio or llama.cpp, it uses those instead |
 | **Models** | Optional. Tokamak reads your existing Hugging Face / LM Studio / Ollama caches, and can download new ones itself |
+
+One caveat worth stating plainly: **on Linux the runtime Tokamak fetches is
+Vulkan or CPU**, because llama.cpp publishes no prebuilt CUDA build for Linux.
+NVIDIA users who want CUDA should install their distribution's CUDA-enabled
+`llama.cpp` — Tokamak finds it on `PATH` and prefers it. Windows gets CUDA
+directly.
 
 <details>
 <summary><b>Building from source instead</b></summary>
 
 Needs Rust (stable) and Node.js 20+.
+
+On Linux, also the Tauri v2 system libraries:
+
+```bash
+sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev \
+  librsvg2-dev libxdo-dev libssl-dev patchelf
+```
+
+Then, on either platform:
 
 ```bash
 git clone https://github.com/360NoScopeGuru/tokamak
@@ -190,7 +209,7 @@ Shipped:
 
 Ahead:
 
-- **Rev F** *(in progress)* — speculative decoding: draft-model suggestions, VRAM budgeting for the draft, and a live accept-rate display
+- **Rev F** *(in progress)* — speculative decoding: the draft picker, its compatibility checks and VRAM budgeting ship in v0.1.3; a live accept-rate display in the cockpit is still to come
 - **Rev G** — conversation branching: fork at any message, compare branches side by side
 - **Rev H** — LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion
 
