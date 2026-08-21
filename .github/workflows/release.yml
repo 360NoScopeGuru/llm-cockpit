@@ -108,6 +108,14 @@ jobs:
             prebuilt CUDA build for Linux, so the runtime Tokamak fetches there
             is Vulkan or CPU. NVIDIA users who want CUDA should install their
             distribution's CUDA-enabled `llama.cpp` — Tokamak finds it on PATH.
+
+            > **The Linux packages are experimental.** They build and launch —
+            > the process starts, the window opens and the backend initialises —
+            > but the interface has not yet been seen rendering on a real Linux
+            > desktop. WebKitGTK needs a working EGL display, which none of the
+            > virtualised X servers available for testing could provide. If it
+            > comes up blank for you, please open an issue with your
+            > distribution, GPU and desktop session.
           releaseDraft: true
           prerelease: false
 
