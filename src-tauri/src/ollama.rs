@@ -83,8 +83,26 @@ pub fn discover() -> Vec<OllamaModel> {
         out.push(model);
     }
     out.sort_by_cached_key(|m| m.name.to_lowercase());
-    out.dedup_by(|a, b| a.blob_path == b.blob_path);
+    dedup_by_blob(&mut out);
     out
+}
+
+/// Collapse tags that point at the same weights, keeping the first survivor in
+/// the vector's existing order.
+///
+/// One blob is routinely referenced by several manifests: `ollama pull qwen3`
+/// followed by `ollama pull qwen3:14b` leaves `qwen3:latest` and `qwen3:14b`
+/// naming one file on disk, and the library should offer it once.
+///
+/// This used to be `dedup_by`, which only collapses *consecutive* duplicates.
+/// The vector is sorted by name, not by blob, so two tags for the same file are
+/// adjacent only when their names happen to sort next to each other. Any
+/// unrelated model landing between them — `qwen3:14b`, `qwen3-coder:30b`,
+/// `qwen3:latest` — and the duplicate came through, so the same weights were
+/// listed twice under different names.
+fn dedup_by_blob(models: &mut Vec<OllamaModel>) {
+    let mut seen = std::collections::HashSet::new();
+    models.retain(|m| seen.insert(m.blob_path.clone()));
 }
 
 /// Parse one manifest file into a model, if it names a weights blob that exists.
@@ -182,6 +200,44 @@ mod tests {
         );
         // too shallow to be a manifest
         assert_eq!(model_name(Path::new("/m/stray-file"), root), None);
+    }
+
+    #[test]
+    fn dedup_collapses_non_adjacent_aliases() {
+        let blob = |n: &str| PathBuf::from(format!("/m/blobs/sha256-{n}"));
+        let m = |name: &str, b: &str| OllamaModel {
+            name: name.to_string(),
+            blob_path: blob(b),
+            size_bytes: 1,
+        };
+        // Name order, as `discover` leaves it. The two `qwen3` tags share a
+        // blob but are separated by an unrelated model — the case the old
+        // consecutive-only dedup let through.
+        let mut v = vec![
+            m("qwen3:14b", "aaa"),
+            m("qwen3-coder:30b", "bbb"),
+            m("qwen3:latest", "aaa"),
+        ];
+        dedup_by_blob(&mut v);
+        let names: Vec<&str> = v.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["qwen3:14b", "qwen3-coder:30b"]);
+    }
+
+    #[test]
+    fn dedup_keeps_distinct_blobs_and_first_name() {
+        let m = |name: &str, b: &str| OllamaModel {
+            name: name.to_string(),
+            blob_path: PathBuf::from(b),
+            size_bytes: 1,
+        };
+        // Adjacent aliases still collapse, and the survivor is the one that
+        // came first — alphabetically first, given `discover`'s sort.
+        let mut v = vec![m("a:14b", "x"), m("a:latest", "x"), m("b:7b", "y")];
+        dedup_by_blob(&mut v);
+        assert_eq!(
+            v.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["a:14b", "b:7b"]
+        );
     }
 
     /// Reports whatever is in this machine's Ollama store. Ignored by default;
