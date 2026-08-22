@@ -25,6 +25,7 @@ import {
   DraftCandidate,
   SessionMeta,
   Settings,
+  SpecProgress,
   SuiteRow,
   TelemetrySnapshot,
   VramEstimate,
@@ -77,7 +78,12 @@ export default function App() {
   const consoleRef = useRef<ConsoleHandle>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [launching, setLaunching] = useState(false);
-  const [liveCfg, setLiveCfg] = useState<{ ngl: number; ctx: number } | null>(null);
+  const [liveCfg, setLiveCfg] = useState<{ ngl: number; ctx: number; draft: string | null } | null>(
+    null
+  );
+  // Live speculative-decoding counters, pushed by the chat backend. Held here
+  // rather than in the console because the readout lives in the telemetry rail.
+  const [spec, setSpec] = useState<SpecProgress | null>(null);
   const [history, setHistory] = useState<FluxSample[]>([]);
   const [bench, setBench] = useState<{
     path: string;
@@ -173,6 +179,18 @@ export default function App() {
         }
       }
     ).then((u) => (disposed ? u() : (un = u)));
+    return () => {
+      disposed = true;
+      un?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let un: (() => void) | undefined;
+    listen<SpecProgress>("spec-progress", (e) => setSpec(e.payload)).then((u) =>
+      disposed ? u() : (un = u)
+    );
     return () => {
       disposed = true;
       un?.();
@@ -393,7 +411,8 @@ export default function App() {
         draft_n_gpu_layers: draft ? 999 : null,
       };
       const status = await invoke<ServerStatus>("llama_start", { config: cfg });
-      setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size });
+      setLiveCfg({ ngl: cfg.n_gpu_layers, ctx: cfg.ctx_size, draft: cfg.draft_model_path });
+      setSpec(null);
       setServer(status);
     } catch (e) {
       setError(String(e));
@@ -409,6 +428,7 @@ export default function App() {
       /* ignore */
     }
     setLiveCfg(null);
+    setSpec(null);
     setServer(await invoke<ServerStatus>("llama_status"));
   }
 
@@ -864,6 +884,8 @@ export default function App() {
           ctxSize={liveCfg?.ctx ?? null}
           history={history}
           kvAlert={kvAlert}
+          spec={spec}
+          draftActive={!!liveCfg?.draft}
         />
       </div>
 

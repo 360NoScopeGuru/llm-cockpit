@@ -155,6 +155,18 @@ export interface SpecResult {
   speedup: number;
 }
 
+/// Live speculative-decoding counters for the generation in flight, pushed
+/// from `chat.rs` as `spec-progress` events. Cumulative per generation, not
+/// per delta. `draft_n` stays 0 when no draft model is loaded, and also when
+/// the server is too old to report the counters at all — the cockpit tells
+/// those two apart from the running server's config, not from this.
+export interface SpecProgress {
+  id: number;
+  draft_n: number;
+  draft_n_accepted: number;
+  accept_rate: number;
+}
+
 export interface BenchResult {
   n_gpu_layers: number;
   ctx_size: number;

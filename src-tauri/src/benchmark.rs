@@ -333,7 +333,11 @@ fn parse_timings(body: &str) -> Option<(f64, f64)> {
 /// that convention and the two spellings have moved between releases; looking
 /// in both costs nothing and avoids silently reporting a 0% accept rate —
 /// which would be indistinguishable from a draft that is genuinely useless.
-fn parse_draft_stats(body: &str) -> Option<(u64, u64)> {
+///
+/// Shared with `chat.rs`, which runs the same parse over each streamed SSE
+/// chunk to drive the cockpit's live accept-rate readout. Same JSON shape,
+/// same two spellings, so the convention lives in one place.
+pub(crate) fn parse_draft_stats(body: &str) -> Option<(u64, u64)> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
     let pick = |obj: &serde_json::Value| -> Option<(u64, u64)> {
         let n = obj.get("draft_n")?.as_u64()?;

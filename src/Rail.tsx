@@ -6,6 +6,7 @@ import { Flux, FluxSample } from "./Flux";
 import {
   InferenceMetrics,
   ServerStatus,
+  SpecProgress,
   TelemetrySnapshot,
   VramEstimate,
   BYTES_PER_GB,
@@ -13,9 +14,10 @@ import {
 } from "./types";
 
 // Telemetry stack (right panel): flux trace on top, decode headline, the
-// VRAM rod bank (1 rod ≈ 1 GB; hovering a model in the library projects its
-// footprint as dashed ghost rods), the vitals grid, and KV containment at
-// the bottom — which goes into a pulsing alert at 90%.
+// speculation readout when a draft model is loaded, the VRAM rod bank (1 rod
+// ≈ 1 GB; hovering a model in the library projects its footprint as dashed
+// ghost rods), the vitals grid, and KV containment at the bottom — which goes
+// into a pulsing alert at 90%.
 
 export interface Ghost {
   name: string;
@@ -33,6 +35,13 @@ interface RailProps {
   ctxSize: number | null;
   history: FluxSample[];
   kvAlert: boolean;
+  /// Latest `spec-progress` from the generation in flight, or the last one to
+  /// finish. Null until a generation has started.
+  spec: SpecProgress | null;
+  /// The *running* server was ignited with a draft model. Comes from the launch
+  /// config rather than from `spec`, because a zero accept rate and no draft at
+  /// all are different things and only the config can tell them apart.
+  draftActive: boolean;
 }
 
 interface Seg {
@@ -126,6 +135,58 @@ function Vital({
   );
 }
 
+/// Speculative-decoding readout. Shown only when the running server actually
+/// has a draft model loaded.
+///
+/// Deliberately uncoloured: there is no green band here and no "good" verdict,
+/// because acceptance is not speed. On the development machine a 44% rate
+/// measured 0.65x — slower than no draft at all — since the target was already
+/// decoding at 63 tok/s and every rejected draft token is wasted compute. The
+/// honest reading is this number *next to* the decode headline above it, which
+/// is why the two sit adjacent.
+function Speculation({
+  spec,
+  generating,
+}: {
+  spec: SpecProgress | null;
+  generating: boolean;
+}) {
+  const drafted = spec?.draft_n ?? 0;
+  const pct = drafted > 0 ? (spec as SpecProgress).accept_rate * 100 : 0;
+
+  let caption: string;
+  if (drafted > 0) {
+    caption = `${spec!.draft_n_accepted.toLocaleString()} of ${drafted.toLocaleString()} draft tokens kept`;
+  } else if (generating) {
+    caption = "waiting for the first draft step";
+  } else if (spec) {
+    // A generation ran and the server never reported a counter. Say so: a
+    // silent 0% would look like a uselessly bad draft rather than a server
+    // that does not report, and those call for opposite responses.
+    caption = "last generation reported no draft counters";
+  } else {
+    caption = "draft loaded · idle";
+  }
+
+  return (
+    <div
+      className="rail-block spec-block"
+      title="Acceptance is not speed. Every rejected draft token is compute spent for nothing, so a high rate on an already-fast model can still run slower than no draft. Benchmark the pair to find out."
+    >
+      <div className="rail-head">
+        <span className="lbl">Speculation</span>
+        <span className={`val ${drafted > 0 ? "" : "ghosted"}`}>
+          {drafted > 0 ? `${pct.toFixed(0)}%` : "—"}
+        </span>
+      </div>
+      <div className="spec-bar">
+        <div className="fill" style={{ width: `${Math.min(100, pct)}%` }} />
+      </div>
+      <div className="rod-caption">{caption}</div>
+    </div>
+  );
+}
+
 export function Rail(p: RailProps) {
   const t = p.telemetry;
   const g = t?.gpus[0] ?? null;
@@ -186,6 +247,8 @@ export function Rail(p: RailProps) {
             : "no reactor lit"}
         </div>
       </div>
+
+      {p.draftActive && <Speculation spec={p.spec} generating={generating} />}
 
       <div className="rail-block">
         <div className="rail-head">
