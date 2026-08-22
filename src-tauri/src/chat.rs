@@ -6,9 +6,10 @@
 //!
 //! Streams completions from the running llama-server's OpenAI-compatible
 //! `/v1/chat/completions` endpoint (SSE) on a worker thread, emitting
-//! `chat-delta` events per token and a final `chat-done` with measured decode
-//! speed. Routing through Rust keeps the webview free of CORS concerns and all
-//! HTTP in one place.
+//! `chat-delta` events per token, `spec-progress` for the speculative-decoding
+//! counters, and a final `chat-done` with measured decode speed. Routing
+//! through Rust keeps the webview free of CORS concerns and all HTTP in one
+//! place.
 //!
 //! Note: the server's root URL serves no web page (LM Studio's llama-server
 //! build ships API routes only, so `GET /` is a JSON 404) — this console *is*
@@ -63,6 +64,45 @@ struct ChatDone {
     /// one: both just stop arriving. Never drop it on the floor.
     finish: Option<String>,
     error: Option<String>,
+}
+
+/// Running speculative-decoding counters for the generation in flight.
+///
+/// llama.cpp reports `draft_n`/`draft_n_accepted` cumulatively per request, so
+/// each of these is a snapshot of the whole generation so far, not a delta.
+/// The counters are absent entirely unless a draft model is loaded, which is
+/// how the cockpit tells "not speculating" from "speculating badly".
+#[derive(Debug, Clone, Serialize)]
+struct SpecProgress {
+    id: u64,
+    draft_n: u64,
+    draft_n_accepted: u64,
+    /// `draft_n_accepted / draft_n`, or 0.0 before the first draft step.
+    accept_rate: f64,
+}
+
+/// Floor on the gap between `spec-progress` events.
+///
+/// The counters move on every accepted token, and a fast decode would put
+/// several hundred events a second through the webview bridge for a readout
+/// nobody can read faster than a few times a second. The final value is always
+/// emitted once the stream ends, so throttling costs no accuracy.
+const SPEC_EMIT_INTERVAL: Duration = Duration::from_millis(200);
+
+fn emit_spec(window: &tauri::Window, id: u64, (draft_n, accepted): (u64, u64)) {
+    let _ = window.emit(
+        "spec-progress",
+        SpecProgress {
+            id,
+            draft_n,
+            draft_n_accepted: accepted,
+            accept_rate: if draft_n > 0 {
+                accepted as f64 / draft_n as f64
+            } else {
+                0.0
+            },
+        },
+    );
 }
 
 /// Cancel flag for the in-flight generation (one at a time, like the server).
@@ -208,9 +248,16 @@ fn run_stream(
     params: &ChatParams,
     cancel: &AtomicBool,
 ) -> ChatDone {
+    // `timings_per_token` makes llama.cpp attach its `timings` object to every
+    // streamed chunk instead of the final one only. That object is the only
+    // place the draft counters appear on this endpoint — the Prometheus
+    // `/metrics` surface the telemetry cockpit polls has none — so without it
+    // there is no live accept rate to show. Servers that predate the flag
+    // ignore it, and the stream is unaffected.
     let mut body = json!({
         "messages": messages,
         "stream": true,
+        "timings_per_token": true,
     });
     if let Some(v) = params.temperature {
         body["temperature"] = json!(v);
@@ -227,6 +274,10 @@ fn run_stream(
     if let Some(v) = params.max_tokens {
         body["max_tokens"] = json!(v);
     }
+
+    // Clear the previous generation's counters before this one starts, so the
+    // cockpit never shows a stale accept rate against a live stream.
+    emit_spec(window, id, (0, 0));
 
     // Per-read timeout only — an overall timeout would cap long generations.
     let agent = ureq::AgentBuilder::new()
@@ -259,6 +310,8 @@ fn run_stream(
     let mut stopped = false;
     let mut finish: Option<String> = None;
     let mut read_err: Option<String> = None;
+    let mut spec: Option<(u64, u64)> = None;
+    let mut spec_emitted = Instant::now();
 
     for line in reader.lines() {
         if cancel.load(Ordering::Relaxed) {
@@ -284,6 +337,15 @@ fn run_stream(
         if let Some(reason) = extract_finish(payload) {
             finish = Some(reason);
         }
+        if let Some(counts) = crate::benchmark::parse_draft_stats(payload) {
+            if spec != Some(counts) {
+                spec = Some(counts);
+                if spec_emitted.elapsed() >= SPEC_EMIT_INTERVAL {
+                    spec_emitted = Instant::now();
+                    emit_spec(window, id, counts);
+                }
+            }
+        }
         if let Some((content, reasoning)) = extract_delta(payload) {
             tokens += 1;
             let now = Instant::now();
@@ -298,6 +360,12 @@ fn run_stream(
                 },
             );
         }
+    }
+
+    // The throttle can have swallowed the last update, and the end of the
+    // generation is exactly when the number matters most.
+    if let Some(counts) = spec {
+        emit_spec(window, id, counts);
     }
 
     // Decode rate over the generation span (first token → last token).
@@ -391,6 +459,115 @@ Todo app design"),
         assert!(!long.ends_with("wor"));
         // Nothing usable.
         assert_eq!(clean_title("   "), "");
+    }
+
+    /// The live counters exist at all only because llama.cpp honours
+    /// `timings_per_token` on the OpenAI-compatible endpoint and puts the
+    /// draft pair inside the per-chunk `timings`. That is an assumption about
+    /// somebody else's server, so it is checked against a real one rather than
+    /// asserted in a comment. Ignored (machine-dependent); run with:
+    ///   cargo test -- --ignored --nocapture spec_progress_streams_live
+    ///
+    /// Needs the same tokenizer-compatible pair the benchmark test uses.
+    #[test]
+    #[ignore]
+    fn spec_progress_streams_live() {
+        use crate::llama::{LlamaManager, LlamaServerConfig};
+
+        const PROBE_PORT: u16 = 8141;
+
+        let models = crate::scanner::scan_models(&[]);
+        let find = |needle: &str| {
+            models
+                .iter()
+                .find(|m| {
+                    m.display_name
+                        .as_deref()
+                        .unwrap_or(&m.file_name)
+                        .to_lowercase()
+                        .contains(needle)
+                })
+                .map(|m| m.path.clone())
+        };
+        let (Some(target), Some(draft)) = (find("qwen3:14b"), find("qwen3-0.6b")) else {
+            eprintln!("target/draft pair not present, skipping");
+            return;
+        };
+
+        let mgr = LlamaManager::new();
+        mgr.start(LlamaServerConfig {
+            model_path: target,
+            n_gpu_layers: Some(999),
+            ctx_size: Some(4096),
+            port: PROBE_PORT,
+            draft_model_path: Some(draft),
+            draft_n_gpu_layers: Some(999),
+            ..Default::default()
+        })
+        .expect("server start");
+
+        let deadline = Instant::now() + Duration::from_secs(180);
+        while Instant::now() < deadline && mgr.status().health != "ok" {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        assert_eq!(mgr.status().health, "ok", "server never became healthy");
+
+        let resp = ureq::AgentBuilder::new()
+            .timeout_read(Duration::from_secs(120))
+            .build()
+            .post(&format!("http://127.0.0.1:{PROBE_PORT}/v1/chat/completions"))
+            .set("Content-Type", "application/json")
+            .send_string(
+                &json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": "Count from one to forty in words, one per line."
+                    }],
+                    "stream": true,
+                    "timings_per_token": true,
+                    "max_tokens": 200,
+                })
+                .to_string(),
+            )
+            .expect("stream request");
+
+        // How many chunks carried counters, and what they said. A single
+        // reading at the end would not prove the readout is *live*; the point
+        // is that the numbers arrive while the answer is still being written.
+        let mut chunks_with_counters = 0usize;
+        let mut first: Option<(u64, u64)> = None;
+        let mut last: Option<(u64, u64)> = None;
+        let mut total_chunks = 0usize;
+        for line in BufReader::new(resp.into_reader()).lines() {
+            let line = line.expect("stream read");
+            let Some(payload) = sse_payload(&line) else {
+                continue;
+            };
+            if payload == "[DONE]" {
+                break;
+            }
+            total_chunks += 1;
+            if let Some(counts) = crate::benchmark::parse_draft_stats(payload) {
+                chunks_with_counters += 1;
+                first.get_or_insert(counts);
+                last = Some(counts);
+            }
+        }
+        let _ = mgr.stop();
+
+        println!("chunks: {total_chunks}, of which {chunks_with_counters} carried draft counters");
+        println!("first: {first:?}  last: {last:?}");
+
+        assert!(
+            chunks_with_counters > 1,
+            "no live draft counters: {chunks_with_counters} of {total_chunks} chunks carried them              -- `timings_per_token` is not doing what the rail depends on"
+        );
+        let (n, acc) = last.expect("counters present");
+        assert!(n > 0, "draft_n stayed zero while speculating");
+        assert!(acc <= n, "accepted {acc} exceeds drafted {n}");
+        // Counters are cumulative per request, so they must not go backwards.
+        let (n0, _) = first.unwrap();
+        assert!(n >= n0, "draft_n went backwards: {n0} then {n}");
     }
 
     #[test]

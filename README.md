@@ -206,10 +206,10 @@ Shipped:
 - **Rev C** — live telemetry cockpit: rod bank, flux trace, KV containment alert
 - **Rev D** — chat and agent tabs, sandboxed workspace tools, full session history
 - **Rev E** — in-app model downloads and a managed `llama.cpp` runtime, so LM Studio is not a prerequisite
+- **Rev F** — speculative decoding: draft picker with tokenizer-compatibility checks and VRAM budgeting, plus a live accept-rate readout in the cockpit while the model generates
 
 Ahead:
 
-- **Rev F** *(in progress)* — speculative decoding: the draft picker, its compatibility checks and VRAM budgeting ship in v0.1.3; a live accept-rate display in the cockpit is still to come
 - **Rev G** — conversation branching: fork at any message, compare branches side by side
 - **Rev H** — LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion
 
