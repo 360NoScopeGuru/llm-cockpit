@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tokamak — the local LLM app that shows its work</title>
-<meta name="description" content="A Windows desktop app for running local LLMs that shows the arithmetic: what fits on your GPU, at what context, and what each quant costs — before you download anything. Hardware-aware auto-config, measured benchmarks, live telemetry. The VRAM solver on this page runs the app's real estimator.">
+<meta name="description" content="A Windows and Linux desktop app for running local LLMs that shows the arithmetic: what fits on your GPU, at what context, and what each quant costs — before you download anything. Hardware-aware auto-config, measured benchmarks, live telemetry. The VRAM solver on this page runs the app's real estimator.">
 <meta property="og:title" content="Tokamak — the local LLM app that shows its work">
 <meta property="og:description" content="Know what fits on your GPU before you download it. Hardware-aware auto-config, quant advice, measured benchmarks and live telemetry for llama.cpp. No lock-in, plain GGUF.">
 <meta property="og:type" content="website">
@@ -306,6 +306,7 @@ input[type=range]:focus-visible{outline:1px solid var(--c-acc);outline-offset:4p
 .card h3{font-size:14px;letter-spacing:.12em}
 .card p{font-size:14.5px;color:var(--c-dim);overflow-wrap:anywhere}
 .card .go{margin-top:auto;font:400 11px var(--mono);letter-spacing:.14em;color:var(--c-acc)}
+.card.wide{margin-top:clamp(14px,2vw,20px)}
 a.card{transition:border-color .2s}
 a.card:hover{border-color:var(--c-acc)}
 details{margin-top:22px;border-top:1px solid var(--c-line);padding-top:16px}
@@ -446,7 +447,7 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
 <!-- ══ SHEET 1 ══════════════════════════════════════════════════════════ -->
 <section class="sheet" id="s1" data-sheet="COLD START">
   <div class="wrap">
-    <div class="meta">DRAWING TKMK-0102 · REV C · SCALE 1:1 · SHEET 1 OF 7 · MPL-2.0</div>
+    <div class="meta">DRAWING TKMK-0103 · REV F · SCALE 1:1 · SHEET 1 OF 7 · MPL-2.0</div>
     <div class="hgrid">
       <div class="hcol" data-draw>
         <!-- Line breaks are explicit because the type size is solved against
@@ -467,7 +468,7 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
         </p>
         <div class="cta">
           <a class="stamp" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
-            ▸ DOWNLOAD .MSI<small>WINDOWS x64 · 4.2 MB · v0.1.2</small>
+            ▸ DOWNLOAD v0.1.3<small>WINDOWS .MSI · LINUX .APPIMAGE</small>
           </a>
           <a class="stamp ghost" href="#s3">
             DRIVE THE SOLVER<small>NO INSTALL · RUNS HERE</small>
@@ -476,8 +477,8 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
       </div>
       <dl class="spec" data-draw>
         <div><dt>UNIT</dt><dd>TOKAMAK</dd></div>
-        <div><dt>VERSION</dt><dd>0.1.2</dd></div>
-        <div><dt>PLATFORM</dt><dd>WINDOWS x64 · NVIDIA</dd></div>
+        <div><dt>VERSION</dt><dd>0.1.3</dd></div>
+        <div><dt>PLATFORM</dt><dd>WINDOWS · LINUX x64 · NVIDIA</dd></div>
         <div><dt>SHELL</dt><dd>TAURI 2 · RUST + REACT</dd></div>
         <div><dt>ENGINE</dt><dd>llama.cpp — MANAGED</dd></div>
         <div><dt>WEIGHTS</dt><dd>PLAIN GGUF · NO STORE</dd></div>
@@ -626,24 +627,40 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
     <p class="intro">No Rust, no Node, no toolchain. Installers are built by CI on every tagged version.</p>
     <div class="two">
       <a class="card" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
-        <h3>01 · WINDOWS INSTALLER</h3>
+        <h3>01 · WINDOWS</h3>
         <p>Take the <code>.msi</code> from the latest release and run it. That is the
            whole process. An <code>.exe</code> setup is published alongside it.</p>
         <p>Windows will warn that the publisher is unknown — the build is unsigned.
            Choose <b>More info → Run anyway</b>.</p>
         <span class="go">LATEST RELEASE →</span>
       </a>
-      <div class="card">
-        <h3>02 · WHAT YOU ALSO NEED</h3>
-        <p>An <b>NVIDIA GPU</b>. Telemetry and benchmarking read NVML. That is the
-           only hard requirement.</p>
-        <p><b>No separate inference runtime to install.</b> On first run Tokamak
-           offers to fetch the right llama.cpp build for your GPU and manages it
-           itself — and picks up LM Studio's binaries automatically if you already
-           have them.</p>
-        <p>Models are optional too: it reads your existing Hugging&nbsp;Face,
-           LM&nbsp;Studio and Ollama caches, and downloads new ones itself.</p>
-      </div>
+      <a class="card" href="https://github.com/360NoScopeGuru/tokamak/releases/latest">
+        <h3>02 · LINUX</h3>
+        <p>An <code>.AppImage</code> that installs nothing — <code>chmod +x</code> and
+           run it — or a <code>.deb</code> or <code>.rpm</code> if you would rather it
+           went through your package manager. Built on Ubuntu&nbsp;22.04, so it wants
+           22.04 or an equivalently recent distribution.</p>
+        <p>These are new, and the interface has not yet been seen rendering on a real
+           Linux desktop session. If it comes up blank, please open an issue with your
+           distribution, GPU and session type.</p>
+        <span class="go">LATEST RELEASE →</span>
+      </a>
+    </div>
+    <div class="card wide">
+      <h3>03 · WHAT YOU ALSO NEED</h3>
+      <p>An <b>NVIDIA GPU</b>. Telemetry and benchmarking read NVML. That is the
+         only hard requirement.</p>
+      <p><b>No separate inference runtime to install.</b> On first run Tokamak
+         offers to fetch the right llama.cpp build for your GPU and manages it
+         itself — and picks up LM Studio's binaries automatically if you already
+         have them.</p>
+      <p>One caveat worth stating plainly: <b>on Linux the runtime it fetches is
+         Vulkan or CPU</b>, because llama.cpp publishes no prebuilt CUDA build for
+         Linux. Install your distribution's CUDA-enabled <code>llama.cpp</code> and
+         Tokamak finds it on <code>PATH</code> and prefers it. Windows gets CUDA
+         directly.</p>
+      <p>Models are optional too: it reads your existing Hugging&nbsp;Face,
+         LM&nbsp;Studio and Ollama caches, and downloads new ones itself.</p>
     </div>
     <details>
       <summary>▸ BUILDING FROM SOURCE INSTEAD</summary>
@@ -651,7 +668,10 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
 <span class="c">cd</span> tokamak
 <span class="c">npm</span> install
 <span class="c">npm</span> run tauri dev      <span class="c"># development</span>
-<span class="c">npm</span> run tauri build    <span class="c"># release build</span></pre>
+<span class="c">npm</span> run tauri build    <span class="c"># release build</span>
+
+<span class="c"># Linux also needs the Tauri v2 system libraries:</span>
+<span class="c">sudo</span> apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev   librsvg2-dev libxdo-dev libssl-dev patchelf</pre>
     </details>
   </div>
 </section>
@@ -806,8 +826,8 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
           <tr><td class="r">C</td><td class="s">SHIPPED</td><td class="w">Live telemetry cockpit — rod bank, flux trace, KV containment alert</td></tr>
           <tr><td class="r">D</td><td class="s">SHIPPED</td><td class="w">Chat and agent tabs, sandboxed workspace tools, full session history</td></tr>
           <tr><td class="r">E</td><td class="s">SHIPPED</td><td class="w">In-app model downloads and a managed llama.cpp runtime</td></tr>
-          <tr class="now"><td class="r">F</td><td class="s">▸ NOW</td><td class="w">Speculative decoding — draft-model suggestions and a live accept-rate graph</td></tr>
-          <tr><td class="r">G</td><td class="s">NEXT</td><td class="w">Conversation branching — fork at any message, compare branches side by side</td></tr>
+          <tr><td class="r">F</td><td class="s">SHIPPED</td><td class="w">Speculative decoding — draft picker with tokenizer-compatibility checks and VRAM budgeting, and a live accept-rate readout in the cockpit</td></tr>
+          <tr class="now"><td class="r">G</td><td class="s">▸ NEXT</td><td class="w">Conversation branching — fork at any message, compare branches side by side</td></tr>
           <tr><td class="r">H</td><td class="s">LATER</td><td class="w">LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion</td></tr>
         </tbody>
       </table>
@@ -818,8 +838,8 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
 
 <footer>
   <div class="wrap fgrid">
-    <span>TOKAMAK · v0.1.2 · MPL-2.0</span>
-    <span>WINDOWS + NVIDIA FIRST</span>
+    <span>TOKAMAK · v0.1.3 · MPL-2.0</span>
+    <span>WINDOWS + LINUX · NVIDIA FIRST</span>
     <span class="sp"><a href="https://github.com/360NoScopeGuru/tokamak">GITHUB.COM/360NOSCOPEGURU/TOKAMAK</a></span>
   </div>
 </footer>
@@ -830,8 +850,8 @@ footer{border-top:1px solid var(--c-rule);padding:32px 0 clamp(56px,8vw,90px);
   <div class="r"><span>SHEET <b id="tbNo">01</b>/07</span></div>
   <div class="r"><span class="sec" id="tbSec">COLD START</span></div>
   <div class="r opt"><span id="tbState">○ UNPOWERED</span></div>
-  <div class="r opt"><span>v0.1.2 · MPL-2.0</span></div>
-  <div class="r end"><a href="https://github.com/360NoScopeGuru/tokamak/releases/latest">▸ DOWNLOAD .MSI</a></div>
+  <div class="r opt"><span>v0.1.3 · MPL-2.0</span></div>
+  <div class="r end"><a href="https://github.com/360NoScopeGuru/tokamak/releases/latest">▸ DOWNLOAD</a></div>
 </aside>
 
 <script>
