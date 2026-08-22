@@ -95,22 +95,22 @@ jobs:
           tagName: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           releaseName: Tokamak ${{ github.ref_name }}
           releaseBody: |
-            No toolchain required — download, run, done.
+            No toolchain required: download, run, done.
 
-            **Windows** — `.msi` or `.exe`. Needs an NVIDIA GPU for telemetry
+            **Windows**: `.msi` or `.exe`. Needs an NVIDIA GPU for telemetry
             and benchmarking (NVML), and a `llama-server` binary; Tokamak can
             fetch one for you, and finds LM Studio's automatically if it is
             installed.
 
-            **Linux** — `.AppImage` (works anywhere; `chmod +x` and run),
+            **Linux**: `.AppImage` (works anywhere; `chmod +x` and run),
             `.deb`, or `.rpm`. Built on Ubuntu 22.04, so it installs on 22.04
             and newer. One caveat worth stating plainly: llama.cpp publishes no
             prebuilt CUDA build for Linux, so the runtime Tokamak fetches there
             is Vulkan or CPU. NVIDIA users who want CUDA should install their
-            distribution's CUDA-enabled `llama.cpp` — Tokamak finds it on PATH.
+            distribution's CUDA-enabled `llama.cpp`, which Tokamak finds on PATH.
 
-            > **The Linux packages are experimental.** They build and launch —
-            > the process starts, the window opens and the backend initialises —
+            > **The Linux packages are experimental.** They build and launch
+            > (the process starts, the window opens and the backend initialises),
             > but the interface has not yet been seen rendering on a real Linux
             > desktop. WebKitGTK needs a working EGL display, which none of the
             > virtualised X servers available for testing could provide. If it
