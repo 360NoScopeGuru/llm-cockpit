@@ -207,10 +207,10 @@ Shipped:
 - **Rev D** — chat and agent tabs, sandboxed workspace tools, full session history
 - **Rev E** — in-app model downloads and a managed `llama.cpp` runtime, so LM Studio is not a prerequisite
 - **Rev F** — speculative decoding: draft picker with tokenizer-compatibility checks and VRAM budgeting, plus a live accept-rate readout in the cockpit while the model generates
+- **Rev G** — conversation branching: retry a reply or continue from any point down a new branch, switch between versions in place, and compare them side by side with the settings and the cost that produced each
 
 Ahead:
 
-- **Rev G** — conversation branching: fork at any message, compare branches side by side
 - **Rev H** — LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion
 
 Also wanted, unscheduled: sampler presets. Every exchange already records the

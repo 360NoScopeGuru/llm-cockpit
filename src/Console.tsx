@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import {
-  Fragment,
   ReactNode,
   forwardRef,
   useEffect,
@@ -14,6 +13,9 @@ import {
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { Markdown } from "./Markdown";
+import { Turn, chain, childrenOf, leafUnder, pathTo } from "./branch";
+import { SamplerRow, ancestorSampler } from "./SamplerRow";
+import { Compare } from "./Compare";
 import {
   DraftCandidate,
   InferenceMetrics,
@@ -37,27 +39,6 @@ import {
 
 type TabKind = "chat" | "code";
 
-interface Turn {
-  /// Stable node id, assigned the moment the turn is created.
-  id: string;
-  /// The turn this one follows. `null` marks a root.
-  parent: string | null;
-  role: "user" | "assistant";
-  kind?: "chat" | "tool-result" | "continue";
-  toolName?: string;
-  content: string;
-  thinking?: string;
-  meta?: string;
-  tokens?: number;
-  decodeTokS?: number;
-  stopped?: boolean;
-  /// `undefined` = unknown (e.g. an older saved turn); `null` = the stream
-  /// ended without ever reporting why. These mean different things.
-  finish?: string | null;
-  error?: boolean;
-  ts?: number;
-  sampler?: SamplerSnap;
-}
 
 interface SessionInfo {
   model_name: string | null;
@@ -168,70 +149,8 @@ const MAX_NUDGES = 3;
 
 const estTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
 
-const newTurnId = () =>
-  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-/// The turns on the branch ending at `head`, in conversation order.
-///
-/// Mirrors `history::path_indices` on the Rust side. `head` of `null` resolves
-/// to the last turn, which is what every session written before Rev G means.
-/// The visited set is there because a hand-edited file could contain a cycle,
-/// and a console that hangs on a malformed session is worse than one that
-/// shows a short transcript.
-function pathTo<T extends { id?: string | null; parent?: string | null }>(
-  pool: T[],
-  head: string | null | undefined
-): T[] {
-  if (pool.length === 0) return [];
-  // A pool with no ids is a pre-Rev-G transcript that the backend did not get
-  // to migrate. It is already in order, and walking it as a tree would follow
-  // no edges at all and render only its last turn.
-  if (!pool.some((t) => t.id)) return [...pool];
-  const byId = new Map(pool.flatMap((t) => (t.id ? [[t.id, t] as [string, T]] : [])));
-  let cur: T | undefined = (head && byId.get(head)) || pool[pool.length - 1];
-  const out: T[] = [];
-  const seen = new Set<string>();
-  while (cur && !seen.has(cur.id ?? "")) {
-    seen.add(cur.id ?? "");
-    out.push(cur);
-    cur = cur.parent ? byId.get(cur.parent) : undefined;
-  }
-  return out.reverse();
-}
 
-/// Turns that follow `id` directly, in the order they were created.
-function childrenOf(pool: Turn[], id: string | null): Turn[] {
-  return pool.filter((t) => (t.parent ?? null) === id);
-}
-
-/// Walk down from `id` taking the newest child at each step, which is the
-/// branch you were last on. Used when selecting a sibling: you pick a turn,
-/// and the console shows you the whole branch it leads to.
-function leafUnder(pool: Turn[], id: string): string {
-  let cur = id;
-  const seen = new Set<string>();
-  for (;;) {
-    if (seen.has(cur)) return cur; // malformed file; do not spin
-    seen.add(cur);
-    const kids = childrenOf(pool, cur);
-    if (kids.length === 0) return cur;
-    cur = kids[kids.length - 1].id;
-  }
-}
-
-/// Appends turns to a branch, linking each onto the one before it.
-///
-/// Every append in this file goes through here, so no call site can create a
-/// turn without an id and a parent. Today that only ever builds a straight
-/// line; Rev G's UI will pass a different tail to fork from, and this keeps
-/// working unchanged because the edge always comes from whatever it is given.
-function chain(prev: Turn[], ...added: Omit<Turn, "id" | "parent">[]): Turn[] {
-  const out = [...prev];
-  for (const t of added) {
-    out.push({ ...t, id: newTurnId(), parent: out.length ? out[out.length - 1].id : null });
-  }
-  return out;
-}
 
 const newSessionId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 7).replace(/[^a-z0-9]/g, "0")}`;
@@ -311,68 +230,6 @@ function governingSampler(
   return null;
 }
 
-/// The same search as [`governingSampler`], over a pool rather than a branch.
-/// A branch array is already in ancestor order, so the index walk there is
-/// enough; a pool is not ordered at all and has to follow `parent`.
-function ancestorSampler(byId: Map<string, Turn>, from: Turn | undefined): SamplerSnap | null {
-  const seen = new Set<string>();
-  let cur = from;
-  while (cur && !seen.has(cur.id)) {
-    seen.add(cur.id);
-    if (cur.sampler) return cur.sampler;
-    cur = cur.parent ? byId.get(cur.parent) : undefined;
-  }
-  return null;
-}
-
-/// `null` means the field was left blank, so it was omitted from the request
-/// and the server applied its own default. That is not the same as zero, and
-/// the row says so rather than inventing a number.
-const SAMPLER_FIELDS: [keyof SamplerSnap, string, string][] = [
-  ["temperature", "temp", "server default"],
-  ["top_k", "top-k", "server default"],
-  ["top_p", "top-p", "server default"],
-  ["min_p", "min-p", "server default"],
-  ["max_tokens", "max", "∞"],
-];
-
-/// One dim line under a user turn naming the settings that produced the reply
-/// below it. Fields that moved since the previous exchange are marked, so
-/// scanning a long session finds the moment a knob was turned without having
-/// to diff five numbers by eye on every turn.
-function SamplerRow({ snap, prev }: { snap: SamplerSnap; prev: SamplerSnap | null }) {
-  const parts = SAMPLER_FIELDS.map(([key, label, dflt]) => {
-    const v = snap[key] as number | null | undefined;
-    return {
-      key: key as string,
-      text: `${label} ${v ?? dflt}`,
-      changed: prev != null && (prev[key] ?? null) !== (v ?? null),
-      title: undefined as string | undefined,
-    };
-  });
-  const sys = snap.system?.trim() ?? "";
-  const prevSys = prev?.system?.trim() ?? "";
-  if (sys) {
-    parts.push({ key: "system", text: "sys", changed: prev != null && prevSys !== sys, title: sys });
-  } else if (prevSys) {
-    // Silence here would read as "unchanged", which is the opposite of true.
-    parts.push({ key: "system", text: "sys cleared", changed: true, title: undefined });
-  }
-  return (
-    <div className="turn-meta sampler-prov">
-      <span className="prov-tag">⚙</span>
-      {parts.map((part, i) => (
-        <Fragment key={part.key}>
-          {i > 0 && " · "}
-          <span className={part.changed ? "changed" : undefined} title={part.title}>
-            {part.text}
-          </span>
-        </Fragment>
-      ))}
-    </div>
-  );
-}
-
 /// The per-reply branch controls, and the only place a fork is visible.
 ///
 /// `◂ n / m ▸` appears only where a turn actually has siblings, so a
@@ -393,6 +250,7 @@ function BranchBar(p: {
   onRetry: () => void;
   onBranch: () => void;
   onDiscard: () => void;
+  onCompare: () => void;
 }) {
   const at = p.siblings.findIndex((x) => x.id === p.turn.id);
   const forked = p.siblings.length > 1 && at >= 0;
@@ -440,6 +298,15 @@ function BranchBar(p: {
             ⑂ branch
           </button>
         </>
+      )}
+      {forked && (
+        <button
+          className="act"
+          onClick={p.onCompare}
+          title="see these versions side by side"
+        >
+          ⇄ compare
+        </button>
       )}
       {forked && (
         <button className="act discard" onClick={p.onDiscard} disabled={p.busy} title="delete this version and everything after it">
@@ -491,6 +358,11 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   });
   const [streaming, setStreaming] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  /// The fork under comparison, wrapped so that "closed" and "a fork whose
+  /// parent is the root" stay different states. No gesture can produce the
+  /// latter today, but making them the same value is the kind of shortcut that
+  /// only looks safe until one can.
+  const [comparing, setComparing] = useState<{ parent: string | null } | null>(null);
   const [system, setSystem] = useState("");
   const [temp, setTemp] = useState("0.7");
   const [topK, setTopK] = useState("40");
@@ -1252,6 +1124,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       onRetry: () => retry(t),
       onBranch: () => branchFrom(t),
       onDiscard: () => discardBranch(t),
+      onCompare: () => setComparing({ parent: t.parent }),
     };
   }
 
@@ -1325,6 +1198,18 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
 
   return (
     <div className="console">
+      {comparing && (
+        <Compare
+          pool={cur.pool}
+          forkParent={comparing.parent}
+          currentLeaf={cur.head}
+          onUse={(leaf) => {
+            goTo(tab, leaf);
+            setComparing(null);
+          }}
+          onClose={() => setComparing(null)}
+        />
+      )}
       <div className="console-head">
         <span className="tab-bar">
           <button className={`tab-btn ${tab === "chat" ? "active" : ""}`} onClick={() => setTab("chat")}>
