@@ -38,6 +38,10 @@ import {
 type TabKind = "chat" | "code";
 
 interface Turn {
+  /// Stable node id, assigned the moment the turn is created.
+  id: string;
+  /// The turn this one follows. `null` marks a root.
+  parent: string | null;
   role: "user" | "assistant";
   kind?: "chat" | "tool-result" | "continue";
   toolName?: string;
@@ -154,6 +158,50 @@ const MAX_TOOL_ROUNDS = 24;
 const MAX_NUDGES = 3;
 
 const estTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
+
+const newTurnId = () =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+/// The turns on the branch ending at `head`, in conversation order.
+///
+/// Mirrors `history::path_indices` on the Rust side. `head` of `null` resolves
+/// to the last turn, which is what every session written before Rev G means.
+/// The visited set is there because a hand-edited file could contain a cycle,
+/// and a console that hangs on a malformed session is worse than one that
+/// shows a short transcript.
+function pathTo(pool: StoredTurn[], head: string | null | undefined): StoredTurn[] {
+  if (pool.length === 0) return [];
+  // A pool with no ids is a pre-Rev-G transcript that the backend did not get
+  // to migrate. It is already in order, and walking it as a tree would follow
+  // no edges at all and render only its last turn.
+  if (!pool.some((t) => t.id)) return [...pool];
+  const byId = new Map(
+    pool.flatMap((t) => (t.id ? [[t.id, t] as [string, StoredTurn]] : []))
+  );
+  let cur = (head && byId.get(head)) || pool[pool.length - 1];
+  const out: StoredTurn[] = [];
+  const seen = new Set<string>();
+  while (cur && !seen.has(cur.id ?? "")) {
+    seen.add(cur.id ?? "");
+    out.push(cur);
+    cur = (cur.parent && byId.get(cur.parent)) as StoredTurn;
+  }
+  return out.reverse();
+}
+
+/// Appends turns to a branch, linking each onto the one before it.
+///
+/// Every append in this file goes through here, so no call site can create a
+/// turn without an id and a parent. Today that only ever builds a straight
+/// line; Rev G's UI will pass a different tail to fork from, and this keeps
+/// working unchanged because the edge always comes from whatever it is given.
+function chain(prev: Turn[], ...added: Omit<Turn, "id" | "parent">[]): Turn[] {
+  const out = [...prev];
+  for (const t of added) {
+    out.push({ ...t, id: newTurnId(), parent: out.length ? out[out.length - 1].id : null });
+  }
+  return out;
+}
 
 const newSessionId = () =>
   `${Date.now()}-${Math.random().toString(36).slice(2, 7).replace(/[^a-z0-9]/g, "0")}`;
@@ -389,6 +437,8 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
 
   function toStored(t: Turn): StoredTurn {
     return {
+      id: t.id,
+      parent: t.parent,
       role: t.role,
       kind: t.kind === "tool-result" || t.kind === "continue" ? t.kind : null,
       tool_name: t.toolName ?? null,
@@ -407,7 +457,12 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   function persist(k: TabKind) {
     const t = tabsRef.current[k];
     if (!t.id) return;
-    const turns = t.turns.filter((x) => x.content || x.thinking);
+    // Empty turns are dropped, but only when nothing follows them: removing a
+    // node mid-chain would orphan its children. Today the only empty turn is
+    // the in-flight assistant reply at the tail, so this drops exactly what it
+    // always did — it just stays correct once a pool can branch.
+    const claimed = new Set(t.turns.map((x) => x.parent).filter(Boolean));
+    const turns = t.turns.filter((x) => x.content || x.thinking || claimed.has(x.id));
     if (turns.length === 0) return;
     const srv = serverRef.current;
     const info: SessionInfo =
@@ -436,6 +491,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       ...info,
       created_ms: t.createdMs || Date.now(),
       updated_ms: Date.now(),
+      head: turns.length ? turns[turns.length - 1].id : null,
       turns: turns.map(toStored),
     };
     invoke("history_save", { session })
@@ -490,10 +546,14 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       });
     } catch (e) {
       setStreaming(false);
-      patchTurns(k, (prev) => [
-        ...prev.slice(0, -1),
-        { role: "assistant", content: `⚠ ${e}`, error: true, ts: Date.now() },
-      ]);
+      patchTurns(k, (prev) =>
+        chain(prev.slice(0, -1), {
+          role: "assistant",
+          content: `⚠ ${e}`,
+          error: true,
+          ts: Date.now(),
+        })
+      );
     }
   }
 
@@ -573,13 +633,13 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     });
   }
 
-  function continueWith(resultTurn: Turn) {
+  function continueWith(resultTurn: Omit<Turn, "id" | "parent">) {
     const k: TabKind = "code";
-    const next: Turn[] = [
-      ...tabsRef.current[k].turns,
-      resultTurn,
-      { role: "assistant", content: "", ts: Date.now() },
-    ];
+    const next = chain(tabsRef.current[k].turns, resultTurn, {
+      role: "assistant",
+      content: "",
+      ts: Date.now(),
+    });
     patchTab(k, (t) => ({ ...t, turns: next }));
     setTimeout(() => persist(k), 50);
     dispatch(k, next);
@@ -604,9 +664,8 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       if (nudgesRef.current >= MAX_NUDGES || roundsRef.current >= MAX_TOOL_ROUNDS) {
         nudgesRef.current = 0;
         roundsRef.current = 0;
-        patchTurns("code", (prev) => [
-          ...prev,
-          {
+        patchTurns("code", (prev) =>
+          chain(prev, {
             role: "assistant",
             content:
               `⚠ the model kept stopping early (${MAX_NUDGES} nudges). It may be ` +
@@ -614,8 +673,8 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
               `give it a smaller step.`,
             error: true,
             ts: Date.now(),
-          },
-        ]);
+          })
+        );
         return;
       }
       nudgesRef.current += 1;
@@ -631,15 +690,14 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       return;
     }
     if (roundsRef.current >= MAX_TOOL_ROUNDS) {
-      patchTurns("code", (prev) => [
-        ...prev,
-        {
+      patchTurns("code", (prev) =>
+        chain(prev, {
           role: "assistant",
           content: `⚠ agent stopped after ${MAX_TOOL_ROUNDS} tool rounds — send a message to continue`,
           error: true,
           ts: Date.now(),
-        },
-      ]);
+        })
+      );
       roundsRef.current = 0;
       nudgesRef.current = 0;
       return;
@@ -743,8 +801,8 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   function continueGen() {
     const k = tab;
     if (!ready || streaming || toolBusy || pendingTool) return;
-    const next: Turn[] = [
-      ...tabsRef.current[k].turns,
+    const next = chain(
+      tabsRef.current[k].turns,
       {
         role: "user",
         kind: "continue",
@@ -753,8 +811,8 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
           "what you already wrote.",
         ts: Date.now(),
       },
-      { role: "assistant", content: "", ts: Date.now() },
-    ];
+      { role: "assistant", content: "", ts: Date.now() }
+    );
     patchTab(k, (t) => ({ ...t, turns: next }));
     dispatch(k, next);
   }
@@ -779,11 +837,11 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       max_tokens: parseInt(s.maxTok, 10) || null,
       system: systemRef.current.trim() || null,
     };
-    const next: Turn[] = [
-      ...t.turns,
+    const next = chain(
+      t.turns,
       { role: "user", content: text, ts: Date.now(), sampler: snap },
-      { role: "assistant", content: "", ts: Date.now() },
-    ];
+      { role: "assistant", content: "", ts: Date.now() }
+    );
     patchTab(k, (prev) => ({
       ...prev,
       id: prev.id ?? newSessionId(),
@@ -858,7 +916,12 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     try {
       const s = await invoke<StoredSession>("history_get", { id });
       const kind: TabKind = s.kind === "code" ? "code" : "chat";
-      const turns: Turn[] = s.turns.map((st, i) => ({
+      // The pool is stored unordered; the transcript is the branch `head`
+      // names. For a session that never forked these are the same array.
+      const path = pathTo(s.turns, s.head);
+      const turns: Turn[] = path.map((st, i) => ({
+        id: st.id ?? `t${i}`,
+        parent: st.parent ?? null,
         role: st.role === "user" ? "user" : "assistant",
         kind:
           st.kind === "tool-result" || st.kind === "continue"
@@ -881,7 +944,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
                 st.decode_tok_s,
                 st.stopped,
                 st.finish,
-                governingSampler(s.turns, i)?.max_tokens ?? null
+                governingSampler(path, i)?.max_tokens ?? null
               )
             : undefined,
       }));

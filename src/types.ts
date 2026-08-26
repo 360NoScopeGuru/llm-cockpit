@@ -208,6 +208,11 @@ export interface SamplerSnap {
 }
 
 export interface StoredTurn {
+  /// Stable node id. Absent only in files written before Rev G; the backend
+  /// fills it on load, so the frontend never sees one missing.
+  id?: string | null;
+  /// The turn this one follows. `null` marks a root.
+  parent?: string | null;
   role: string;
   kind?: string | null;
   tool_name?: string | null;
@@ -236,6 +241,8 @@ export interface StoredSession {
   workspace?: string | null;
   created_ms: number;
   updated_ms: number;
+  /// Leaf of the branch last selected. `null` resolves to the last turn.
+  head?: string | null;
   turns: StoredTurn[];
 }
 
@@ -249,7 +256,11 @@ export interface SessionMeta {
   workspace: string | null;
   created_ms: number;
   updated_ms: number;
+  /// Turns on the active branch, not the size of the pool.
   turn_count: number;
+  /// Leaves in the pool. 1 means the session never forked.
+  branch_count: number;
+  /// Every token generated, abandoned branches included.
   total_tokens: number;
   avg_decode_tok_s: number;
 }
