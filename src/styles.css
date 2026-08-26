@@ -936,6 +936,100 @@ select:focus {
   cursor: help;
   border-bottom: 1px dotted currentColor;
 }
+/* Branch controls under a reply. The ◂ n/m ▸ readout is state and always
+   shows; the actions are held back until the turn is hovered or focused, so a
+   conversation that never forks reads exactly as it did before Rev G. The row
+   stays in flow rather than appearing on hover — a transcript that reflows
+   under the pointer is worse than a little quiet space. */
+.branch-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  min-height: 19px;
+  font: 10.5px var(--mono);
+}
+.branch-bar .act {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+  background: none;
+  border: 1px solid transparent;
+  color: var(--low);
+  padding: 2px 6px;
+  font: inherit;
+  cursor: pointer;
+}
+.turn:hover .branch-bar .act,
+.branch-bar:focus-within .act {
+  opacity: 1;
+}
+.branch-bar .act:hover:not(:disabled) {
+  color: var(--plasma);
+  border-color: var(--hair-strong);
+}
+.branch-bar .act:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+.branch-bar .act.discard:hover:not(:disabled) {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+.branch-pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--hair);
+  padding: 1px 3px;
+  color: var(--mid);
+}
+.branch-pick b {
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  padding: 0 3px;
+  color: var(--plasma);
+}
+.branch-pick button {
+  background: none;
+  border: 0;
+  color: var(--low);
+  padding: 0 3px;
+  font: inherit;
+  cursor: pointer;
+  line-height: 1;
+}
+.branch-pick button:hover:not(:disabled) { color: var(--plasma); }
+.branch-pick button:disabled { color: var(--faint); cursor: default; }
+
+/* Sending from off the tip forks rather than continues. Say so where the
+   typing happens, not in a corner of the transcript. */
+.branch-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid var(--hair-strong);
+  border-left: 2px solid var(--plasma);
+  background: var(--bg2);
+  color: var(--mid);
+  font: 11px var(--mono);
+  padding: 7px 10px;
+  margin-bottom: 8px;
+}
+.branch-note button {
+  background: none;
+  border: 1px solid var(--hair-strong);
+  color: var(--plasma);
+  font: inherit;
+  padding: 2px 8px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.branch-note button:hover { border-color: var(--plasma3); }
+
+@media (prefers-reduced-motion: reduce) {
+  .branch-bar .act { transition: none; }
+}
 .caret-blink {
   display: inline-block;
   width: 8px;

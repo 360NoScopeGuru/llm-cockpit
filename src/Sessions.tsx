@@ -66,6 +66,10 @@ export function Sessions(p: SessionsProps) {
                   {m.ctx_size ? ` · ${ctxLabel(m.ctx_size)} ctx` : ""}
                   {m.workspace ? ` · ⌂ ${baseName(m.workspace)}` : ""}
                   {` · ${m.turn_count} turns`}
+                  {/* Only worth saying when it is true. `turn_count` is the
+                      branch you would reopen on, so a forked session needs
+                      this to explain why the token total runs ahead of it. */}
+                  {m.branch_count > 1 ? ` · ⑂ ${m.branch_count} branches` : ""}
                   {m.total_tokens > 0 ? ` · ${m.total_tokens.toLocaleString()} tok` : ""}
                   {m.avg_decode_tok_s > 0 ? ` · ${m.avg_decode_tok_s.toFixed(1)} tok/s` : ""}
                 </span>
