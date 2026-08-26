@@ -71,6 +71,13 @@ interface SessionInfo {
 interface TabState {
   id: string | null;
   createdMs: number;
+  /// Every turn in the session, in no meaningful order.
+  pool: Turn[];
+  /// Leaf of the branch on screen. `null` means the tip of the pool.
+  head: string | null;
+  /// The branch on screen, root to head. Always `pathTo(pool, head)` — kept
+  /// alongside rather than recomputed at each read, because every consumer in
+  /// this file wants the flat array and none of them care how it was chosen.
   turns: Turn[];
   input: string;
   loadedInfo: SessionInfo | null; // metadata from a reopened session
@@ -82,6 +89,8 @@ interface TabState {
 const emptyTab = (): TabState => ({
   id: null,
   createdMs: 0,
+  pool: [],
+  head: null,
   turns: [],
   input: "",
   loadedInfo: null,
@@ -169,24 +178,45 @@ const newTurnId = () =>
 /// The visited set is there because a hand-edited file could contain a cycle,
 /// and a console that hangs on a malformed session is worse than one that
 /// shows a short transcript.
-function pathTo(pool: StoredTurn[], head: string | null | undefined): StoredTurn[] {
+function pathTo<T extends { id?: string | null; parent?: string | null }>(
+  pool: T[],
+  head: string | null | undefined
+): T[] {
   if (pool.length === 0) return [];
   // A pool with no ids is a pre-Rev-G transcript that the backend did not get
   // to migrate. It is already in order, and walking it as a tree would follow
   // no edges at all and render only its last turn.
   if (!pool.some((t) => t.id)) return [...pool];
-  const byId = new Map(
-    pool.flatMap((t) => (t.id ? [[t.id, t] as [string, StoredTurn]] : []))
-  );
-  let cur = (head && byId.get(head)) || pool[pool.length - 1];
-  const out: StoredTurn[] = [];
+  const byId = new Map(pool.flatMap((t) => (t.id ? [[t.id, t] as [string, T]] : [])));
+  let cur: T | undefined = (head && byId.get(head)) || pool[pool.length - 1];
+  const out: T[] = [];
   const seen = new Set<string>();
   while (cur && !seen.has(cur.id ?? "")) {
     seen.add(cur.id ?? "");
     out.push(cur);
-    cur = (cur.parent && byId.get(cur.parent)) as StoredTurn;
+    cur = cur.parent ? byId.get(cur.parent) : undefined;
   }
   return out.reverse();
+}
+
+/// Turns that follow `id` directly, in the order they were created.
+function childrenOf(pool: Turn[], id: string | null): Turn[] {
+  return pool.filter((t) => (t.parent ?? null) === id);
+}
+
+/// Walk down from `id` taking the newest child at each step, which is the
+/// branch you were last on. Used when selecting a sibling: you pick a turn,
+/// and the console shows you the whole branch it leads to.
+function leafUnder(pool: Turn[], id: string): string {
+  let cur = id;
+  const seen = new Set<string>();
+  for (;;) {
+    if (seen.has(cur)) return cur; // malformed file; do not spin
+    seen.add(cur);
+    const kids = childrenOf(pool, cur);
+    if (kids.length === 0) return cur;
+    cur = kids[kids.length - 1].id;
+  }
 }
 
 /// Appends turns to a branch, linking each onto the one before it.
@@ -281,6 +311,20 @@ function governingSampler(
   return null;
 }
 
+/// The same search as [`governingSampler`], over a pool rather than a branch.
+/// A branch array is already in ancestor order, so the index walk there is
+/// enough; a pool is not ordered at all and has to follow `parent`.
+function ancestorSampler(byId: Map<string, Turn>, from: Turn | undefined): SamplerSnap | null {
+  const seen = new Set<string>();
+  let cur = from;
+  while (cur && !seen.has(cur.id)) {
+    seen.add(cur.id);
+    if (cur.sampler) return cur.sampler;
+    cur = cur.parent ? byId.get(cur.parent) : undefined;
+  }
+  return null;
+}
+
 /// `null` means the field was left blank, so it was omitted from the request
 /// and the server applied its own default. That is not the same as zero, and
 /// the row says so rather than inventing a number.
@@ -329,6 +373,83 @@ function SamplerRow({ snap, prev }: { snap: SamplerSnap; prev: SamplerSnap | nul
   );
 }
 
+/// The per-reply branch controls, and the only place a fork is visible.
+///
+/// `◂ n / m ▸` appears only where a turn actually has siblings, so a
+/// conversation that never forked looks exactly as it always did. Discard is
+/// offered on the same terms: with one child there is no branch to discard,
+/// only a conversation to delete, and that is a different gesture.
+function BranchBar(p: {
+  turn: Turn;
+  siblings: Turn[];
+  /// Retry and branch only make sense on a finished reply.
+  canRetry: boolean;
+  /// A generation or tool call is in flight, so nothing may touch the pool.
+  busy: boolean;
+  /// A server is up. Only retry needs one — reading and pruning branches is
+  /// history, not inference, and gating it on the reactor would be wrong.
+  canGenerate: boolean;
+  onGo: (id: string) => void;
+  onRetry: () => void;
+  onBranch: () => void;
+  onDiscard: () => void;
+}) {
+  const at = p.siblings.findIndex((x) => x.id === p.turn.id);
+  const forked = p.siblings.length > 1 && at >= 0;
+  // Nothing to offer: the common case, and it must cost no space at all.
+  if (!forked && !p.canRetry) return null;
+  return (
+    <div className="branch-bar">
+      {forked && (
+        <span className="branch-pick">
+          <button
+            onClick={() => p.onGo(p.siblings[at - 1].id)}
+            disabled={at === 0}
+            title="previous version of this reply"
+          >
+            ◂
+          </button>
+          <b>
+            {at + 1} / {p.siblings.length}
+          </b>
+          <button
+            onClick={() => p.onGo(p.siblings[at + 1].id)}
+            disabled={at === p.siblings.length - 1}
+            title="next version of this reply"
+          >
+            ▸
+          </button>
+        </span>
+      )}
+      {p.canRetry && (
+        <>
+          <button
+            className="act"
+            onClick={p.onRetry}
+            disabled={p.busy || !p.canGenerate}
+            title="ask again — this reply is kept"
+          >
+            ↻ retry
+          </button>
+          <button
+            className="act"
+            onClick={p.onBranch}
+            disabled={p.busy}
+            title="continue from here down a new branch"
+          >
+            ⑂ branch
+          </button>
+        </>
+      )}
+      {forked && (
+        <button className="act discard" onClick={p.onDiscard} disabled={p.busy} title="delete this version and everything after it">
+          ✕
+        </button>
+      )}
+    </div>
+  );
+}
+
 function metaLine(
   tokens?: number | null,
   rate?: number | null,
@@ -369,6 +490,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     code: emptyTab(),
   });
   const [streaming, setStreaming] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [system, setSystem] = useState("");
   const [temp, setTemp] = useState("0.7");
   const [topK, setTopK] = useState("40");
@@ -413,6 +535,9 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   const fault = !!server?.error && !ready && !igniting;
   const cur = tabs[tab];
   const lastTurn = cur.turns[cur.turns.length - 1];
+  /// True when the branch on screen ends where the pool does. Off the tip,
+  /// sending forks rather than continues, and the composer says so.
+  const atTip = cur.head === null || childrenOf(cur.pool, cur.head).length === 0;
   const canContinue =
     ready &&
     !streaming &&
@@ -429,8 +554,87 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     setTabs((prev) => ({ ...prev, [k]: fn(prev[k]) }));
   }
 
+  /// Folds a rewritten branch back into the pool.
+  ///
+  /// Nodes are matched by id and updated in place; anything the rewrite
+  /// dropped from the branch is removed from the pool rather than left behind
+  /// as a stray leaf, and genuinely new nodes are appended. Head follows the
+  /// new tip. Every mutation in this file lands here, so the invariant that
+  /// `turns === pathTo(pool, head)` holds in exactly one place.
+  function onBranch(t: TabState, path: Turn[]): TabState {
+    const onPath = new Set(path.map((x) => x.id));
+    const wasOnPath = new Set(t.turns.map((x) => x.id));
+    const fresh = new Map(path.map((x) => [x.id, x]));
+    const pool: Turn[] = [];
+    for (const x of t.pool) {
+      // Leaving the branch is not the same as being deleted. A rewrite may
+      // discard an empty stub — the in-flight reply being replaced by an
+      // error — but never a turn that has content, because that turn is a
+      // branch now and dropping it is what retry must not do.
+      const abandoned = wasOnPath.has(x.id) && !onPath.has(x.id);
+      if (abandoned && !x.content && !x.thinking) continue;
+      pool.push(fresh.get(x.id) ?? x);
+      fresh.delete(x.id);
+    }
+    for (const x of path) if (fresh.has(x.id)) pool.push(x);
+    return { ...t, pool, head: path.length ? path[path.length - 1].id : null, turns: path };
+  }
+
   function patchTurns(k: TabKind, fn: (turns: Turn[]) => Turn[]) {
-    patchTab(k, (t) => ({ ...t, turns: fn(t.turns) }));
+    patchTab(k, (t) => onBranch(t, fn(t.turns)));
+  }
+
+  /// Move the console to the branch ending at `head` without changing a thing
+  /// about the pool. This is what every branch gesture reduces to.
+  function goTo(k: TabKind, head: string | null) {
+    patchTab(k, (t) => ({ ...t, head, turns: pathTo(t.pool, head) }));
+  }
+
+  /// Rewind to just before `t` and continue from there. Nothing is written
+  /// yet — the next message becomes a sibling of whatever already follows.
+  function branchFrom(t: Turn) {
+    if (streaming || toolBusy || pendingTool) return;
+    goTo(tab, t.id);
+    inputRef.current?.focus();
+  }
+
+  /// Ask the same question again. The existing reply is not touched; it stays
+  /// in the pool as the branch you can switch back to.
+  function retry(t: Turn) {
+    const k = tab;
+    if (!ready || streaming || toolBusy || pendingTool) return;
+    const base = pathTo(tabsRef.current[k].pool, t.parent);
+    if (base.length === 0) return;
+    roundsRef.current = 0;
+    nudgesRef.current = 0;
+    const next = chain(base, { role: "assistant", content: "", ts: Date.now() });
+    patchTab(k, (prev) => onBranch(prev, next));
+    setTimeout(() => persist(k), 50);
+    dispatch(k, next);
+  }
+
+  /// Throw away the branch under `t` and land on the sibling next to it.
+  /// Refuses to leave nothing behind: a lone child is the conversation, not a
+  /// branch, and deleting it would be a delete gesture wearing a fork's coat.
+  function discardBranch(t: Turn) {
+    const k = tab;
+    if (streaming || toolBusy || pendingTool) return;
+    const pool = tabsRef.current[k].pool;
+    const siblings = childrenOf(pool, t.parent ?? null);
+    if (siblings.length < 2) return;
+    const doomed = new Set<string>();
+    const walk = (id: string) => {
+      if (doomed.has(id)) return;
+      doomed.add(id);
+      for (const c of childrenOf(pool, id)) walk(c.id);
+    };
+    walk(t.id);
+    const at = siblings.findIndex((x) => x.id === t.id);
+    const landing = siblings[at === 0 ? 1 : at - 1];
+    const kept = pool.filter((x) => !doomed.has(x.id));
+    const head = leafUnder(kept, landing.id);
+    patchTab(k, (prev) => ({ ...prev, pool: kept, head, turns: pathTo(kept, head) }));
+    setTimeout(() => persist(k), 50);
   }
 
   // ---- persistence ----
@@ -457,13 +661,17 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
   function persist(k: TabKind) {
     const t = tabsRef.current[k];
     if (!t.id) return;
-    // Empty turns are dropped, but only when nothing follows them: removing a
-    // node mid-chain would orphan its children. Today the only empty turn is
-    // the in-flight assistant reply at the tail, so this drops exactly what it
-    // always did — it just stays correct once a pool can branch.
-    const claimed = new Set(t.turns.map((x) => x.parent).filter(Boolean));
-    const turns = t.turns.filter((x) => x.content || x.thinking || claimed.has(x.id));
+    // The whole pool is written, not just the branch on screen: the other
+    // branches are the session too. Empty turns are dropped, but only when
+    // nothing follows them, since removing a node mid-chain would orphan its
+    // children — in practice that is the in-flight reply at a branch tip.
+    const claimed = new Set(t.pool.map((x) => x.parent).filter(Boolean));
+    const turns = t.pool.filter((x) => x.content || x.thinking || claimed.has(x.id));
     if (turns.length === 0) return;
+    // Head is the tip of the visible branch after that drop, so a session
+    // saved mid-reply reopens on the branch you were actually reading.
+    const kept = new Set(turns.map((x) => x.id));
+    const branch = t.turns.filter((x) => kept.has(x.id));
     const srv = serverRef.current;
     const info: SessionInfo =
       srv?.running
@@ -483,7 +691,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
             ctx_size: null,
             workspace: k === "code" ? wsRef.current : null,
           };
-    const firstUser = turns.find((x) => x.role === "user" && x.kind !== "tool-result");
+    const firstUser = branch.find((x) => x.role === "user" && x.kind !== "tool-result");
     const session: StoredSession = {
       id: t.id,
       kind: k,
@@ -491,7 +699,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       ...info,
       created_ms: t.createdMs || Date.now(),
       updated_ms: Date.now(),
-      head: turns.length ? turns[turns.length - 1].id : null,
+      head: branch.length ? branch[branch.length - 1].id : null,
       turns: turns.map(toStored),
     };
     invoke("history_save", { session })
@@ -640,7 +848,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       content: "",
       ts: Date.now(),
     });
-    patchTab(k, (t) => ({ ...t, turns: next }));
+    patchTab(k, (t) => onBranch(t, next));
     setTimeout(() => persist(k), 50);
     dispatch(k, next);
   }
@@ -813,7 +1021,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       },
       { role: "assistant", content: "", ts: Date.now() }
     );
-    patchTab(k, (t) => ({ ...t, turns: next }));
+    patchTab(k, (t) => onBranch(t, next));
     dispatch(k, next);
   }
 
@@ -843,10 +1051,9 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       { role: "assistant", content: "", ts: Date.now() }
     );
     patchTab(k, (prev) => ({
-      ...prev,
+      ...onBranch(prev, next),
       id: prev.id ?? newSessionId(),
       createdMs: prev.createdMs || Date.now(),
-      turns: next,
       input: "",
     }));
     setTimeout(() => persist(k), 50);
@@ -918,8 +1125,10 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
       const kind: TabKind = s.kind === "code" ? "code" : "chat";
       // The pool is stored unordered; the transcript is the branch `head`
       // names. For a session that never forked these are the same array.
-      const path = pathTo(s.turns, s.head);
-      const turns: Turn[] = path.map((st, i) => ({
+      // Map the whole pool once, then fill in each reply's meta line by
+      // walking its own ancestors — the branch on screen is not the only one
+      // that needs it, since switching branches must not lose the readout.
+      const pool: Turn[] = s.turns.map((st, i) => ({
         id: st.id ?? `t${i}`,
         parent: st.parent ?? null,
         role: st.role === "user" ? "user" : "assistant",
@@ -937,22 +1146,26 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
         error: st.error ?? undefined,
         ts: st.timestamp_ms || undefined,
         sampler: st.sampler ?? undefined,
-        meta:
-          st.role === "assistant" && st.kind !== "tool-result"
-            ? metaLine(
-                st.tokens,
-                st.decode_tok_s,
-                st.stopped,
-                st.finish,
-                governingSampler(path, i)?.max_tokens ?? null
-              )
-            : undefined,
       }));
+      const byId = new Map(pool.map((t) => [t.id, t]));
+      for (const t of pool) {
+        if (t.role !== "assistant" || t.kind === "tool-result") continue;
+        t.meta = metaLine(
+          t.tokens,
+          t.decodeTokS,
+          t.stopped,
+          t.finish,
+          ancestorSampler(byId, t)?.max_tokens ?? null
+        );
+      }
+      const turns = pathTo(pool, s.head);
       setTabs((prev) => ({
         ...prev,
         [kind]: {
           id: s.id,
           createdMs: s.created_ms,
+          pool,
+          head: turns.length ? turns[turns.length - 1].id : null,
           turns,
           input: "",
           title: s.title || null,
@@ -1023,6 +1236,25 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
 
   // ---- turn rendering ----
 
+  /// Retry forks an *assistant* turn — two versions of one reply. Branching
+  /// forks a *user* turn — two different follow-ups to one reply. Both are
+  /// real, both need the same `◂ n / m ▸`, so the picker follows siblings
+  /// wherever they are and only the retry actions care about the role.
+  function branchProps(t: Turn, done: boolean) {
+    const siblings = childrenOf(cur.pool, t.parent ?? null);
+    return {
+      turn: t,
+      siblings,
+      canRetry: t.role === "assistant" && done && !!t.content,
+      busy: busyLoop,
+      canGenerate: ready,
+      onGo: (id: string) => goTo(tab, leafUnder(cur.pool, id)),
+      onRetry: () => retry(t),
+      onBranch: () => branchFrom(t),
+      onDiscard: () => discardBranch(t),
+    };
+  }
+
   function renderTurn(t: Turn, i: number, all: Turn[]) {
     const isLast = i === all.length - 1;
     const mine = streamTab.current === tab;
@@ -1086,6 +1318,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
         {t.role === "user" && t.sampler && (
           <SamplerRow snap={t.sampler} prev={governingSampler(all, i - 1)} />
         )}
+        {!t.error && <BranchBar {...branchProps(t, done)} />}
       </div>
     );
   }
@@ -1310,6 +1543,17 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
 
       {!p.board && (
         <>
+          {!atTip && (
+            <div className="branch-note">
+              <span>
+                ⑂ reading from an earlier point — your next message starts a new
+                branch here
+              </span>
+              <button onClick={() => goTo(tab, leafUnder(cur.pool, cur.head!))}>
+                back to the latest ▸
+              </button>
+            </div>
+          )}
           <div className="sampler-row">
             {sampler("temp", temp, setTemp)}
             {sampler("top-k", topK, setTopK)}
@@ -1320,6 +1564,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
           </div>
           <div className="composer">
             <textarea
+              ref={inputRef}
               placeholder={
                 !ready
                   ? "ignite a model first"
