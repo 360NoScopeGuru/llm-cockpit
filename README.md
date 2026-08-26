@@ -213,9 +213,10 @@ Ahead:
 - **Rev G** — conversation branching: fork at any message, compare branches side by side
 - **Rev H** — LoRA hot-swap, multi-GPU tensor-parallel control, local quant conversion
 
-Also wanted, unscheduled: sampler presets and per-message settings provenance
-(the sampler parameters are already plumbed through, but there is nothing that
-saves a named preset or records which settings produced a given reply).
+Also wanted, unscheduled: sampler presets. Every exchange already records the
+settings that produced it and the console prints them under the turn, marking
+whatever moved since the previous one; what is still missing is a way to save a
+named set and switch between them.
 
 ## License
 
