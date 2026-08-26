@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 import {
+  Fragment,
   ReactNode,
   forwardRef,
   useEffect,
@@ -213,6 +214,71 @@ function stripToolBlock(content: string): string {
 function capOf(v: string): number | null {
   const n = parseInt(v, 10);
   return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/// The sampler snapshot is written onto the *user* turn that opens an
+/// exchange; the assistant reply it produced carries none. Walk back from `i`
+/// to find the settings actually in force there. Without this, a reloaded
+/// session reports every `finish: "length"` stop as a full context window even
+/// when the user's own max-tokens cap was what ended it — the exact wrong-fix
+/// advice `metaLine` goes out of its way to avoid on the live path.
+function governingSampler(
+  turns: readonly { sampler?: SamplerSnap | null }[],
+  i: number
+): SamplerSnap | null {
+  for (let j = Math.min(i, turns.length - 1); j >= 0; j--) {
+    const s = turns[j].sampler;
+    if (s) return s;
+  }
+  return null;
+}
+
+/// `null` means the field was left blank, so it was omitted from the request
+/// and the server applied its own default. That is not the same as zero, and
+/// the row says so rather than inventing a number.
+const SAMPLER_FIELDS: [keyof SamplerSnap, string, string][] = [
+  ["temperature", "temp", "server default"],
+  ["top_k", "top-k", "server default"],
+  ["top_p", "top-p", "server default"],
+  ["min_p", "min-p", "server default"],
+  ["max_tokens", "max", "∞"],
+];
+
+/// One dim line under a user turn naming the settings that produced the reply
+/// below it. Fields that moved since the previous exchange are marked, so
+/// scanning a long session finds the moment a knob was turned without having
+/// to diff five numbers by eye on every turn.
+function SamplerRow({ snap, prev }: { snap: SamplerSnap; prev: SamplerSnap | null }) {
+  const parts = SAMPLER_FIELDS.map(([key, label, dflt]) => {
+    const v = snap[key] as number | null | undefined;
+    return {
+      key: key as string,
+      text: `${label} ${v ?? dflt}`,
+      changed: prev != null && (prev[key] ?? null) !== (v ?? null),
+      title: undefined as string | undefined,
+    };
+  });
+  const sys = snap.system?.trim() ?? "";
+  const prevSys = prev?.system?.trim() ?? "";
+  if (sys) {
+    parts.push({ key: "system", text: "sys", changed: prev != null && prevSys !== sys, title: sys });
+  } else if (prevSys) {
+    // Silence here would read as "unchanged", which is the opposite of true.
+    parts.push({ key: "system", text: "sys cleared", changed: true, title: undefined });
+  }
+  return (
+    <div className="turn-meta sampler-prov">
+      <span className="prov-tag">⚙</span>
+      {parts.map((part, i) => (
+        <Fragment key={part.key}>
+          {i > 0 && " · "}
+          <span className={part.changed ? "changed" : undefined} title={part.title}>
+            {part.text}
+          </span>
+        </Fragment>
+      ))}
+    </div>
+  );
 }
 
 function metaLine(
@@ -643,7 +709,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
                     e.payload.decode_tok_s,
                     e.payload.stopped,
                     e.payload.finish,
-                    capOf(samplerRef.current.maxTok)
+                    governingSampler(next, next.length - 1)?.max_tokens ?? null
                   ),
             };
           }
@@ -792,7 +858,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
     try {
       const s = await invoke<StoredSession>("history_get", { id });
       const kind: TabKind = s.kind === "code" ? "code" : "chat";
-      const turns: Turn[] = s.turns.map((st) => ({
+      const turns: Turn[] = s.turns.map((st, i) => ({
         role: st.role === "user" ? "user" : "assistant",
         kind:
           st.kind === "tool-result" || st.kind === "continue"
@@ -815,7 +881,7 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
                 st.decode_tok_s,
                 st.stopped,
                 st.finish,
-                st.sampler?.max_tokens ?? null
+                governingSampler(s.turns, i)?.max_tokens ?? null
               )
             : undefined,
       }));
@@ -954,6 +1020,9 @@ export const Console = forwardRef<ConsoleHandle, ConsoleProps>(function Console(
           </div>
         )}
         {t.meta && <div className="turn-meta">{t.meta}</div>}
+        {t.role === "user" && t.sampler && (
+          <SamplerRow snap={t.sampler} prev={governingSampler(all, i - 1)} />
+        )}
       </div>
     );
   }

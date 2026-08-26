@@ -917,6 +917,25 @@ select:focus {
   color: var(--faint);
   margin-top: 7px;
 }
+/* Sampler provenance under a user turn. Deliberately quieter than the reply
+   meta line above it: this is a footnote you read when you care, not a number
+   that should compete with the answer. Only fields that moved since the last
+   exchange get colour. */
+.sampler-prov {
+  margin-top: 4px;
+  opacity: 0.72;
+  letter-spacing: 0.01em;
+}
+.sampler-prov .prov-tag {
+  margin-right: 5px;
+}
+.sampler-prov .changed {
+  color: var(--plasma2);
+}
+.sampler-prov [title] {
+  cursor: help;
+  border-bottom: 1px dotted currentColor;
+}
 .caret-blink {
   display: inline-block;
   width: 8px;
