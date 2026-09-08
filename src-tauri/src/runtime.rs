@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::Emitter;
 
-const RELEASES: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest";
+const RELEASES: &str = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 
 /// One installable backend, assembled from the assets of a llama.cpp release.
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -200,12 +200,23 @@ pub fn options(has_nvidia: bool) -> Result<Vec<RuntimeBuild>, String> {
         .into_string()
         .map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| e.to_string())?;
-    let tag = v
+    let release = v
+        .as_array()
+        .and_then(|arr| {
+            arr.iter().find(|r| {
+                r.get("assets")
+                    .and_then(|a| a.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0) > 1
+            })
+        })
+        .ok_or_else(|| "no releases with assets found".to_string())?;
+    let tag = release
         .get("tag_name")
         .and_then(|t| t.as_str())
         .unwrap_or("latest")
         .to_string();
-    let assets: Vec<(String, u64)> = v
+    let assets: Vec<(String, u64)> = release
         .get("assets")
         .and_then(|a| a.as_array())
         .map(|arr| {
@@ -594,13 +605,19 @@ mod asset_selection {
             .into_string()
             .expect("body");
         let v: serde_json::Value = serde_json::from_str(&body).expect("json");
-        let names: Vec<String> = v["assets"]
+        let release = v
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|r| r["assets"].as_array().map_or(0, |a| a.len()) > 1)
+            .expect("release with assets");
+        let names: Vec<String> = release["assets"]
             .as_array()
             .expect("assets")
             .iter()
             .filter_map(|a| a["name"].as_str().map(str::to_string))
             .collect();
-        println!("release {}", v["tag_name"].as_str().unwrap_or("?"));
+        println!("release {}", release["tag_name"].as_str().unwrap_or("?"));
         for t in [WIN, LINUX] {
             for (what, stem) in [("cpu", t.cpu_stem()), ("vulkan", t.vulkan_stem())] {
                 let hits: Vec<&String> = names.iter().filter(|n| n.contains(&stem)).collect();

@@ -235,12 +235,23 @@ impl LlamaManager {
         if let Some(dir) = bin_path.parent() {
             cmd.current_dir(dir);
         }
-        let orig_path = std::env::var("PATH").unwrap_or_default();
-        let joined: Vec<String> = search
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect();
-        cmd.env("PATH", format!("{};{}", joined.join(";"), orig_path));
+        let orig_path = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths = search.clone();
+        paths.extend(std::env::split_paths(&orig_path));
+        if let Ok(new_path) = std::env::join_paths(&paths) {
+            cmd.env("PATH", new_path);
+        }
+
+        #[cfg(unix)]
+        {
+            let lib_env = if cfg!(target_os = "macos") { "DYLD_LIBRARY_PATH" } else { "LD_LIBRARY_PATH" };
+            let orig_lib = std::env::var_os(lib_env).unwrap_or_default();
+            let mut libs = search.clone();
+            libs.extend(std::env::split_paths(&orig_lib));
+            if let Ok(new_lib) = std::env::join_paths(&libs) {
+                cmd.env(lib_env, new_lib);
+            }
+        }
 
         cmd.stdout(Stdio::from(log)).stderr(Stdio::from(log2));
         #[cfg(windows)]
@@ -540,7 +551,11 @@ fn dir_has_dll(dir: &Path) -> bool {
             rd.flatten().any(|e| {
                 e.path()
                     .extension()
-                    .map(|x| x.eq_ignore_ascii_case("dll"))
+                    .map(|x| {
+                        x.eq_ignore_ascii_case("dll")
+                            || x.eq_ignore_ascii_case("so")
+                            || x.eq_ignore_ascii_case("dylib")
+                    })
                     .unwrap_or(false)
             })
         })
